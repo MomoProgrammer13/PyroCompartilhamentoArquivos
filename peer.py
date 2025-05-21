@@ -21,12 +21,28 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 @Pyro5.api.behavior(instance_mode="single")
 class Peer:
     def __init__(self, peer_id, shared_folder_path):
-        self.peer_id = peer_id
+        self.peer_id = peer_id # Deve ser definido antes de configurar o logger específico
+
+        # Configuração do logging para ficheiro específico do peer
+        log_dir = "logs"
+        os.makedirs(log_dir, exist_ok=True)  # Cria o diretório de logs se não existir
+        self.log_file_path = os.path.join(log_dir, f"{self.peer_id}_app.log")
+
+        # Remove handlers existentes do root logger para evitar duplicação ou conflitos
+        # e configura o logging para este processo de peer
+        for handler in logging.root.handlers[:]:
+            logging.root.removeHandler(handler)
+        
+        logging.basicConfig(level=logging.INFO,
+                            format='%(asctime)s - %(levelname)s - %(peer_id)s - %(message)s',
+                            filename=self.log_file_path,
+                            filemode='w') # 'w' para sobrescrever o log a cada execução
+
         self.logger = logging.LoggerAdapter(logging.getLogger(__name__), {'peer_id': self.peer_id})
 
         self.uri = None
         self.pyro_daemon = None
-        self.ns_proxy = None
+        # self.ns_proxy = None # Removido para forçar a obtenção local de proxies do NS
 
         self.shared_folder = os.path.abspath(shared_folder_path)
         os.makedirs(self.shared_folder, exist_ok=True)
@@ -56,8 +72,9 @@ class Peer:
         try:
             self.pyro_daemon = Pyro5.server.Daemon(host=self._get_local_ip())
             self.uri = self.pyro_daemon.register(self)
-            self.ns_proxy = Pyro5.api.locate_ns(host=NAMESERVER_HOST, port=NAMESERVER_PORT)
-            self.ns_proxy.register(f"{PEER_NAME_PREFIX}{self.peer_id}", self.uri)
+            # Obter um proxy NS local para registro inicial
+            ns_proxy_setup = Pyro5.api.locate_ns(host=NAMESERVER_HOST, port=NAMESERVER_PORT)
+            ns_proxy_setup.register(f"{PEER_NAME_PREFIX}{self.peer_id}", self.uri)
             self.logger.info(f"Registrado no daemon PyRO com URI: {self.uri}")
             self.logger.info(f"Registrado no servidor de nomes como: {PEER_NAME_PREFIX}{self.peer_id}")
         except Pyro5.errors.NamingError:
@@ -88,12 +105,15 @@ class Peer:
 
         if old_files != new_files:
             self.logger.info(f"Mudança nos arquivos locais detectada. Novos arquivos: {self.local_files}")
-            if self.current_tracker_proxy and not self.is_tracker and self.current_tracker_uri_str:
+            if self.current_tracker_uri_str and not self.is_tracker: # Modificado para usar URI
                 try:
+                    # Criar proxy localmente para esta operação, especialmente se chamado de um thread diferente (ex: CLI)
+                    tracker_proxy_local = Pyro5.api.Proxy(self.current_tracker_uri_str)
+                    tracker_proxy_local._pyroTimeout = 5 # Definir timeout
                     self.logger.info(
                         f"Notificando tracker {self.current_tracker_uri_str} (Época {self.current_tracker_epoch}) sobre mudança nos arquivos.")
                     # A resposta do register_files pode indicar se a época está baixa
-                    response = self.current_tracker_proxy.register_files(self.peer_id, str(self.uri), self.local_files,
+                    response = tracker_proxy_local.register_files(self.peer_id, str(self.uri), self.local_files,
                                                                          self.current_tracker_epoch)
                     if isinstance(response, dict) and response.get("status") == "epoch_too_low":
                         self.logger.warning(
@@ -115,72 +135,98 @@ class Peer:
         self.logger.info("Procurando por um tracker ativo...")
         latest_epoch_found = -1
         tracker_uri_to_connect = None
+        ns_proxy_local_discover = None
 
-        # Procura do tracker com a maior época válida
-        for i in range(MAX_EPOCH_SEARCH, -1, -1):  # Começa da época mais alta possível
-            tracker_name_to_find = f"{TRACKER_BASE_NAME}{i}"
-            try:
-                uri = self.ns_proxy.lookup(tracker_name_to_find)
-                if uri:
-                    temp_proxy = Pyro5.api.Proxy(uri)
-                    temp_proxy._pyroTimeout = 1.5  # Timeout curto para ping
-                    temp_proxy.ping()
+        try:
+            ns_proxy_local_discover = Pyro5.api.locate_ns(host=NAMESERVER_HOST, port=NAMESERVER_PORT)
+        except Pyro5.errors.NamingError:
+            self.logger.error(f"Servidor de nomes não encontrado em _discover_tracker.")
+            # A lógica de eleição ou Peer1 se tornando tracker será acionada abaixo
+            pass # Permite que o código abaixo lide com ns_proxy_local_discover sendo None
 
-                    latest_epoch_found = i
-                    tracker_uri_to_connect = uri
-                    self.logger.info(f"Tracker encontrado: {tracker_name_to_find} com URI {uri} (Época {i}).")
-                    break  # Encontrou o mais recente, para a busca
-            except Pyro5.errors.NamingError:
-                continue  # Tracker para esta época não encontrado no NS
-            except Pyro5.errors.CommunicationError:
-                self.logger.warning(
-                    f"Tracker {tracker_name_to_find} (URI {uri if 'uri' in locals() else 'desconhecido'}) encontrado no NS, mas não respondeu ao ping. Considerando-o falho.")
-                # Não remove do NS aqui, pois pode ser temporário ou outro peer pode estar tentando.
-                # A lógica de eleição e heartbeats deve lidar com a substituição.
-                continue
-            except Exception as e:
-                self.logger.warning(f"Erro ao tentar conectar/pingar ao tracker {tracker_name_to_find}: {e}")
-                continue
+        if ns_proxy_local_discover:
+            # Procura do tracker com a maior época válida
+            for i in range(MAX_EPOCH_SEARCH, -1, -1):  # Começa da época mais alta possível
+                tracker_name_to_find = f"{TRACKER_BASE_NAME}{i}"
+                uri_obj_from_ns = None
+                try:
+                    uri_obj_from_ns = ns_proxy_local_discover.lookup(tracker_name_to_find)
+                    if uri_obj_from_ns:
+                        # Criar um novo proxy para o tracker candidato no thread atual, usando str(uri_obj_from_ns)
+                        temp_proxy = Pyro5.api.Proxy(str(uri_obj_from_ns))
+                        temp_proxy._pyroTimeout = 1.5  # Timeout curto para ping
+                        temp_proxy.ping()
+
+                        latest_epoch_found = i
+                        tracker_uri_to_connect = uri_obj_from_ns # Armazena o objeto URI original
+                        self.logger.info(f"Tracker encontrado: {tracker_name_to_find} com URI {uri_obj_from_ns} (Época {i}).")
+                        break  # Encontrou o mais recente, para a busca
+                except Pyro5.errors.NamingError:
+                    continue  # Tracker para esta época não encontrado no NS
+                except Pyro5.errors.CommunicationError:
+                    self.logger.warning(
+                        f"Tracker {tracker_name_to_find} (URI {uri_obj_from_ns if uri_obj_from_ns else 'desconhecido'}) encontrado no NS, mas não respondeu ao ping. Considerando-o falho.")
+                    continue
+                except Exception as e:
+                    self.logger.warning(f"Erro ao tentar conectar/pingar ao tracker {tracker_name_to_find} (URI {uri_obj_from_ns if uri_obj_from_ns else 'desconhecido'}): {e}")
+                    continue
+        else: # ns_proxy_local_discover is None
+            self.logger.warning("Não foi possível conectar ao servidor de nomes durante a descoberta de tracker.")
+
 
         if tracker_uri_to_connect:
             self._connect_to_tracker(tracker_uri_to_connect, latest_epoch_found)
         else:
             # Nenhum tracker ativo encontrado após varredura
             if self.peer_id == "Peer1" and self.current_tracker_epoch == 0 and latest_epoch_found == -1:
-                # Condição especial para Peer1 se tornar o tracker inicial da Época 1
                 initial_epoch_for_peer1 = 1
                 self.logger.info(
                     f"Nenhum tracker ativo encontrado. Como sou {self.peer_id} e não conheço nenhuma época, tentarei me tornar o tracker inicial da Época {initial_epoch_for_peer1}.")
+
+                ns_proxy_check_peer1 = None
+                can_become_tracker = True
                 try:
-                    self.ns_proxy.lookup(f"{TRACKER_BASE_NAME}{initial_epoch_for_peer1}")
+                    ns_proxy_check_peer1 = Pyro5.api.locate_ns(host=NAMESERVER_HOST, port=NAMESERVER_PORT)
+                    ns_proxy_check_peer1.lookup(f"{TRACKER_BASE_NAME}{initial_epoch_for_peer1}")
                     self.logger.info(
                         f"Um tracker para a Época {initial_epoch_for_peer1} já foi registrado por outro peer enquanto eu verificava. Iniciando eleição normal.")
-                    self.initiate_election()  # Outro peer foi mais rápido
+                    can_become_tracker = False # Outro peer foi mais rápido
                 except Pyro5.errors.NamingError:
-                    # A Época 1 não está registrada, Peer1 pode assumir.
+                    # A Época 1 não está registrada, Peer1 pode assumir (se ns_proxy_check_peer1 foi obtido).
+                    if not ns_proxy_check_peer1: # Falha ao conectar ao NS
+                        self.logger.warning(f"Servidor de nomes inacessível ao tentar verificar {TRACKER_BASE_NAME}{initial_epoch_for_peer1} para Peer1. Não posso me tornar tracker.")
+                        can_become_tracker = False
+                except Exception as e_check:
+                    self.logger.error(f"Erro ao verificar tracker para Peer1: {e_check}")
+                    can_become_tracker = False # Erro, não assume
+
+                if can_become_tracker:
                     self.logger.info(f"Assumindo como Tracker inicial da Época {initial_epoch_for_peer1}.")
-                    self._become_tracker(initial_epoch_for_peer1)  # Peer1 se torna tracker
+                    self._become_tracker(initial_epoch_for_peer1)
+                else:
+                    self.initiate_election() # Se não pode se tornar tracker, inicia eleição
             else:
                 self.logger.info("Nenhum tracker ativo encontrado. Iniciando eleição.")
                 self.initiate_election()
 
     def _connect_to_tracker(self, tracker_uri, epoch):
         """Conecta-se a um tracker existente."""
+        tracker_uri_str = str(tracker_uri) # Garantir que é string para comparações e proxy
         try:
             # Se já estou conectado a este tracker e época, não faz nada
-            if self.current_tracker_uri_str == str(tracker_uri) and self.current_tracker_epoch == epoch:
-                self.logger.debug(f"Já conectado ao tracker {tracker_uri} da época {epoch}.")
+            if self.current_tracker_uri_str == tracker_uri_str and self.current_tracker_epoch == epoch:
+                self.logger.debug(f"Já conectado ao tracker {tracker_uri_str} da época {epoch}.")
                 if not self.is_tracker: self._start_tracker_timeout_detection()  # Garante que o timer está rodando
                 return
 
-            self.logger.info(f"Tentando conectar ao Tracker {str(tracker_uri)} (Época {epoch}).")
-            new_tracker_proxy = Pyro5.api.Proxy(tracker_uri)
+            self.logger.info(f"Tentando conectar ao Tracker {tracker_uri_str} (Época {epoch}).")
+            new_tracker_proxy = Pyro5.api.Proxy(tracker_uri_str) # Usar string URI
             new_tracker_proxy._pyroTimeout = 5
 
             # Ping para confirmar que o novo tracker está realmente acessível antes de mudar
             new_tracker_proxy.ping()
 
-            self.current_tracker_uri_str = str(tracker_uri)
+            self.current_tracker_uri_str = tracker_uri_str
             self.current_tracker_proxy = new_tracker_proxy
             self.current_tracker_epoch = epoch
             self.is_tracker = (str(self.uri) == self.current_tracker_uri_str)
@@ -316,10 +362,11 @@ class Peer:
         self.election_vote_collection_timer.start()
 
     def _send_vote_request_to_peer(self, peer_proxy, peer_uri_str, election_epoch_of_request):
-        # peer_proxy = Pyro5.api.Proxy(peer_uri_str)
+        # peer_proxy é passado como None, então criamos um novo aqui
+        local_peer_proxy = None
         try:
-            peer_proxy = Pyro5.api.Proxy(peer_uri_str)
-            peer_proxy._pyroTimeout = 2
+            local_peer_proxy = Pyro5.api.Proxy(peer_uri_str)
+            local_peer_proxy._pyroTimeout = 2
             # Verifica se ainda sou candidato para ESTA época específica antes de enviar
             if self.candidate_for_epoch == 0 or self.candidate_for_epoch_value != election_epoch_of_request:
                 self.logger.info(
@@ -327,7 +374,7 @@ class Peer:
                 return
 
             self.logger.info(f"Solicitando voto de {peer_uri_str} para época {election_epoch_of_request}")
-            vote_granted = peer_proxy.request_vote(str(self.uri), election_epoch_of_request)
+            vote_granted = local_peer_proxy.request_vote(str(self.uri), election_epoch_of_request)
 
             # Verifica novamente após o retorno, pois o estado pode ter mudado
             if self.candidate_for_epoch == 0 or self.candidate_for_epoch_value != election_epoch_of_request:
@@ -469,11 +516,15 @@ class Peer:
             return  # Já sou este tracker.
 
         self.logger.info(f"Tornando-me Tracker_Epoca_{epoch}.")
-
-        # Antes de se tornar tracker, se havia um tracker anterior de época menor, ele já deve ter sido "esquecido"
-        # ou a lógica de eleição para uma época maior já o substituiu.
-        # A remoção explícita do tracker antigo do NS é complexa e pode causar problemas de concorrência.
-        # A descoberta baseada na maior época é mais robusta.
+        ns_proxy_local_become = None
+        try:
+            ns_proxy_local_become = Pyro5.api.locate_ns(host=NAMESERVER_HOST, port=NAMESERVER_PORT)
+        except Pyro5.errors.NamingError:
+            self.logger.error(f"Falha ao conectar ao servidor de nomes em _become_tracker. Não é possível registrar como tracker.")
+            # Não deve tentar _step_down_as_tracker() aqui se nunca se tornou um.
+            # Apenas limpa o estado local se necessário e retorna.
+            self.is_tracker = False # Garante que não se considera tracker
+            return
 
         # Atualiza o estado interno para ser o tracker
         self.is_tracker = True
@@ -490,20 +541,19 @@ class Peer:
         tracker_name = f"{TRACKER_BASE_NAME}{epoch}"
         try:
             # Tenta remover um registro obsoleto deste mesmo nome (se houver) antes de registrar o novo.
-            # Isso pode acontecer se outro peer tentou registrar esta época e falhou, ou numa re-eleição.
             try:
-                existing_uri = self.ns_proxy.lookup(tracker_name)
-                if existing_uri != self.uri:
+                existing_uri = ns_proxy_local_become.lookup(tracker_name)
+                if existing_uri != self.uri: # Compara com self.uri (objeto URI)
                     self.logger.warning(
                         f"Já existe um registro para {tracker_name} com URI {existing_uri} (diferente do meu). Tentando remover e registrar o meu.")
-                    self.ns_proxy.remove(tracker_name)  # Tenta remover o antigo
-                elif existing_uri == self.uri:
+                    ns_proxy_local_become.remove(tracker_name)  # Tenta remover o antigo
+                elif str(existing_uri) == str(self.uri): # Compara strings de URI
                     self.logger.info(f"Já estou registrado como {tracker_name}. Apenas confirmando.")
 
             except Pyro5.errors.NamingError:
                 pass  # Nome não existe, ótimo.
 
-            self.ns_proxy.register(tracker_name, self.uri)
+            ns_proxy_local_become.register(tracker_name, self.uri)
             self.logger.info(f"Registrado no servidor de nomes como {tracker_name} (URI: {self.uri}).")
         except Exception as e:
             self.logger.error(f"Falha ao registrar como {tracker_name} no servidor de nomes: {e}")
@@ -527,18 +577,21 @@ class Peer:
         self._stop_sending_heartbeats()
 
         tracker_name = f"{TRACKER_BASE_NAME}{epoch_i_was_tracker}"
+        ns_proxy_local_stepdown = None
         try:
-            if self.ns_proxy:
-                # Só remove se o URI no NS for o meu. Evita remover registro de outro tracker.
-                registered_uri = self.ns_proxy.lookup(tracker_name)
-                if registered_uri == self.uri:
-                    self.ns_proxy.remove(tracker_name)
-                    self.logger.info(f"Removido {tracker_name} (meu registro) do servidor de nomes.")
-                else:
-                    self.logger.info(f"Não removi {tracker_name} do NS, pois o URI ({registered_uri}) não é o meu.")
+            ns_proxy_local_stepdown = Pyro5.api.locate_ns(host=NAMESERVER_HOST, port=NAMESERVER_PORT)
+            # Só remove se o URI no NS for o meu. Evita remover registro de outro tracker.
+            registered_uri = ns_proxy_local_stepdown.lookup(tracker_name)
+            if str(registered_uri) == str(self.uri): # Compara strings de URI
+                ns_proxy_local_stepdown.remove(tracker_name)
+                self.logger.info(f"Removido {tracker_name} (meu registro) do servidor de nomes.")
+            else:
+                self.logger.info(f"Não removi {tracker_name} do NS, pois o URI ({registered_uri}) não é o meu.")
         except Pyro5.errors.NamingError:
             self.logger.info(
                 f"{tracker_name} não encontrado no servidor de nomes para remoção (pode já ter sido substituído).")
+        except Pyro5.errors.CommunicationError:
+            self.logger.warning(f"Servidor de nomes inacessível em _step_down_as_tracker ao tentar remover {tracker_name}.")
         except Exception as e:
             self.logger.error(f"Erro ao tentar remover/verificar {tracker_name} do NS: {e}")
 
@@ -648,10 +701,12 @@ class Peer:
 
     def _safe_send_heartbeat_to_one_peer(self, peer_proxy, target_peer_uri_str, tracker_uri_str, tracker_epoch):
         """Função wrapper para enviar heartbeat a um peer individualmente com tratamento de erro."""
+        # peer_proxy é passado como None, criamos um novo aqui
+        local_target_proxy = None
         try:
-            peer_proxy = Pyro5.api.Proxy(target_peer_uri_str)
-            peer_proxy._pyroTimeout = 0.5
-            peer_proxy.receive_heartbeat(tracker_uri_str, tracker_epoch)
+            local_target_proxy = Pyro5.api.Proxy(target_peer_uri_str)
+            local_target_proxy._pyroTimeout = 0.5
+            local_target_proxy.receive_heartbeat(tracker_uri_str, tracker_epoch)
         except Pyro5.errors.CommunicationError:
             self.logger.debug(
                 f"Tracker: Falha de comunicação ao enviar heartbeat para {target_peer_uri_str}. Peer pode estar offline.")
@@ -881,10 +936,10 @@ class Peer:
 
     def cli_search_file(self):
         filename = input("Digite o nome do arquivo para buscar: ")
-        if not self.current_tracker_proxy and not self.is_tracker:
+        if not self.current_tracker_uri_str and not self.is_tracker: # Verifique current_tracker_uri_str
             self.logger.info("Nenhum tracker ativo conhecido. Tentando descobrir...")
             self._discover_tracker()
-            if not self.current_tracker_proxy and not self.is_tracker:
+            if not self.current_tracker_uri_str and not self.is_tracker: # Verifique current_tracker_uri_str novamente
                 self.logger.info("Ainda não há tracker ativo após nova tentativa de descoberta.")
                 return
 
@@ -892,11 +947,14 @@ class Peer:
         if self.is_tracker:  # Se eu sou o tracker
             self.logger.info(f"Consultando meu próprio índice (sou o tracker) por '{filename}'...")
             raw_response = self.query_file(filename, self.current_tracker_epoch)
-        elif self.current_tracker_proxy:
+        elif self.current_tracker_uri_str: # Se tenho um URI de tracker
             try:
+                # Criar proxy localmente para a chamada da CLI
+                tracker_proxy_local = Pyro5.api.Proxy(self.current_tracker_uri_str)
+                tracker_proxy_local._pyroTimeout = 5 # Definir timeout
                 self.logger.info(
                     f"Consultando tracker {self.current_tracker_uri_str} (Época {self.current_tracker_epoch}) por '{filename}'...")
-                raw_response = self.current_tracker_proxy.query_file(filename, self.current_tracker_epoch)
+                raw_response = tracker_proxy_local.query_file(filename, self.current_tracker_epoch)
             except Pyro5.errors.CommunicationError:
                 self.logger.error("Falha de comunicação com o tracker ao buscar arquivo.")
                 self._handle_tracker_communication_error()
@@ -904,7 +962,7 @@ class Peer:
             except Exception as e:
                 self.logger.error(f"Erro ao buscar arquivo no tracker: {e}")
                 return
-        else:  # current_tracker_proxy é None e não sou tracker
+        else:  # current_tracker_uri_str é None e não sou tracker
             self.logger.info("Não foi possível determinar um tracker para consultar.")
             return
 
@@ -990,10 +1048,10 @@ class Peer:
             print(f"  - {f_name}")
 
     def cli_list_network_files(self):
-        if not self.current_tracker_proxy and not self.is_tracker:
+        if not self.current_tracker_uri_str and not self.is_tracker: # Verifique current_tracker_uri_str
             self.logger.info("Nenhum tracker ativo conhecido. Tentando descobrir...")
             self._discover_tracker()
-            if not self.current_tracker_proxy and not self.is_tracker:
+            if not self.current_tracker_uri_str and not self.is_tracker: # Verifique current_tracker_uri_str novamente
                 self.logger.info("Ainda não há tracker ativo após nova tentativa de descoberta.")
                 return
 
@@ -1001,11 +1059,14 @@ class Peer:
         if self.is_tracker:
             self.logger.info("Consultando meu próprio índice (sou o tracker) por todos os arquivos...")
             raw_response = self.get_all_indexed_files(self.current_tracker_epoch)
-        elif self.current_tracker_proxy:
+        elif self.current_tracker_uri_str: # Se tenho um URI de tracker
             try:
+                # Criar proxy localmente para a chamada da CLI
+                tracker_proxy_local = Pyro5.api.Proxy(self.current_tracker_uri_str)
+                tracker_proxy_local._pyroTimeout = 5 # Definir timeout
                 self.logger.info(
                     f"Consultando tracker {self.current_tracker_uri_str} (Época {self.current_tracker_epoch}) por todos os arquivos da rede...")
-                raw_response = self.current_tracker_proxy.get_all_indexed_files(self.current_tracker_epoch)
+                raw_response = tracker_proxy_local.get_all_indexed_files(self.current_tracker_epoch)
             except Pyro5.errors.CommunicationError:
                 self.logger.error("Falha de comunicação com o tracker ao listar arquivos da rede.")
                 self._handle_tracker_communication_error()
@@ -1013,7 +1074,7 @@ class Peer:
             except Exception as e:
                 self.logger.error(f"Erro ao listar arquivos da rede no tracker: {e}")
                 return
-        else:
+        else: # current_tracker_uri_str é None e não sou tracker
             self.logger.info("Não foi possível determinar um tracker para consultar.")
             return
 

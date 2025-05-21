@@ -4,6 +4,7 @@ import time
 import os
 import sys
 import shutil
+import base64  # Adicionar import
 from constants import NAMESERVER_HOST, NAMESERVER_PORT, TOTAL_PEERS_EXPECTED
 
 # --- Configurações ---
@@ -11,6 +12,7 @@ PYTHON_EXECUTABLE = sys.executable  # Usa o mesmo executável Python que está r
 PEER_SCRIPT_PATH = "peer.py"  # Caminho para o script peer.py
 BASE_SHARED_DIR = "p2p_shared_folders"  # Pasta base para os diretórios compartilhados dos peers
 BASE_DOWNLOAD_DIR = "p2p_download_folders"  # Pasta base para os downloads dos peers
+LOGS_DIR = "logs" # Pasta base para os ficheiros de log dos peers
 
 # Arquivos de exemplo para popular as pastas dos peers
 EXAMPLE_FILES_CONTENT = {
@@ -42,15 +44,11 @@ def start_nameserver():
 
 def create_shared_folders_and_files(num_peers):
     """Cria pastas compartilhadas e arquivos de exemplo para cada peer."""
-    if os.path.exists(BASE_SHARED_DIR):
-        print(f"Limpando diretório base de compartilhamento antigo: {BASE_SHARED_DIR}")
-        shutil.rmtree(BASE_SHARED_DIR)
-    os.makedirs(BASE_SHARED_DIR, exist_ok=True)
-
-    if os.path.exists(BASE_DOWNLOAD_DIR):
-        print(f"Limpando diretório base de downloads antigo: {BASE_DOWNLOAD_DIR}")
-        shutil.rmtree(BASE_DOWNLOAD_DIR)
-    os.makedirs(BASE_DOWNLOAD_DIR, exist_ok=True)
+    for dir_to_clean in [BASE_SHARED_DIR, BASE_DOWNLOAD_DIR, LOGS_DIR]:
+        if os.path.exists(dir_to_clean):
+            print(f"Limpando diretório antigo: {dir_to_clean}")
+            shutil.rmtree(dir_to_clean)
+        os.makedirs(dir_to_clean, exist_ok=True)
 
     for i in range(1, num_peers + 1):
         peer_folder_name = f"peer{i}_files"
@@ -81,28 +79,72 @@ def start_peers(num_peers):
     """Inicia múltiplos processos de peers."""
     peer_processes = []
     print(f"\nIniciando {num_peers} peers...")
+
+    is_wt_available = False
+    pwsh_exe = None
+    if os.name == 'nt':
+        is_wt_available = shutil.which("wt.exe") is not None
+        if is_wt_available:
+            pwsh_exe = shutil.which("powershell.exe")
+            if not pwsh_exe:
+                print("AVISO: Windows Terminal (wt.exe) está disponível, mas powershell.exe não foi encontrado no PATH. A visualização de logs dividida será desativada.")
+                # is_wt_available = False # Mantém is_wt_available, mas use_wt será falso abaixo se pwsh_exe for None
+
     for i in range(1, num_peers + 1):
         peer_id = f"Peer{i}"
         shared_folder_path = os.path.join(BASE_SHARED_DIR, f"peer{i}_files")
+        abs_shared_folder_path = os.path.abspath(shared_folder_path)
+        abs_peer_script_path = os.path.abspath(PEER_SCRIPT_PATH)
+        log_file_path = os.path.abspath(os.path.join(LOGS_DIR, f"{peer_id}_app.log"))
 
-        # Para Windows, pode ser necessário ajustar como o subprocess é chamado
-        # ou garantir que o ambiente Python esteja configurado corretamente.
-        # O uso de `creationflags=subprocess.CREATE_NEW_CONSOLE` abre cada peer em um novo console no Windows.
-        # No Linux/macOS, eles rodarão em background ou compartilharão o terminal, dependendo da config.
-        flags = 0
-        if os.name == 'nt':  # Windows
-            flags = subprocess.CREATE_NEW_CONSOLE
+        cmd_list = []
+        # Só usa wt se estiver disponível E powershell.exe também estiver
+        use_wt = is_wt_available and pwsh_exe is not None
 
-        try:
-            cmd = [PYTHON_EXECUTABLE, PEER_SCRIPT_PATH, peer_id, shared_folder_path]
-            print(f"Executando comando: {' '.join(cmd)}")
-            peer_process = subprocess.Popen(cmd, creationflags=flags)
-            peer_processes.append(peer_process)
-            print(f"{peer_id} iniciado (PID: {peer_process.pid}).")
-            time.sleep(0.5)  # Pequena pausa entre o início dos peers
-        except Exception as e:
-            print(f"Erro ao iniciar {peer_id}: {e}")
+        if use_wt:
+            # Comando para executar a CLI do peer no painel superior
+            cmd_peer_cli_parts = [PYTHON_EXECUTABLE, abs_peer_script_path, peer_id, abs_shared_folder_path]
+            
+            # Comando para visualizar os logs no painel inferior
+            ps_command_string = (
+                f"Write-Host '--- Logs para {peer_id} ({os.path.basename(log_file_path)}) ---' -ForegroundColor Cyan; "
+                f"Get-Content '{log_file_path}' -Wait -Tail 30"
+            )
+            
+            # Codificar o comando PowerShell para Base64
+            ps_command_bytes = ps_command_string.encode('utf-16-le')
+            ps_command_b64 = base64.b64encode(ps_command_bytes).decode('ascii')
+            
+            cmd_log_viewer_parts = [pwsh_exe, "-NoProfile", "-NoExit", "-EncodedCommand", ps_command_b64]
 
+            wt_cmd_list = [
+                "wt.exe",
+                "new-tab", "--title", peer_id,
+                *cmd_peer_cli_parts, # Comando para o primeiro painel (CLI)
+                ";",                 # Separador de ações do wt
+                "split-pane", "-H",  # Dividir horizontalmente (novo painel abaixo)
+                *cmd_log_viewer_parts # Comando para o segundo painel (Logs)
+            ]
+            cmd_list = wt_cmd_list
+            print(f"Executando comando com Windows Terminal: {' '.join(wt_cmd_list[:5])} ...") # Log truncado para legibilidade
+            peer_process = subprocess.Popen(cmd_list)
+        else: # Fallback para o método antigo ou para outros OS
+            flags = 0
+            if os.name == 'nt':
+                flags = subprocess.CREATE_NEW_CONSOLE
+                if is_wt_available and not pwsh_exe: # Mensagem específica se wt está lá mas ps não
+                    print(f"Windows Terminal (wt.exe) disponível, mas powershell.exe não. Logs para {peer_id} em {log_file_path}. CLI em janela separada.")
+                else: # Mensagem genérica de fallback
+                    print(f"Windows Terminal (wt.exe) não encontrado ou desativado. Logs para {peer_id} estarão em {log_file_path}. CLI em janela separada.")
+            
+            cmd_list = [PYTHON_EXECUTABLE, PEER_SCRIPT_PATH, peer_id, shared_folder_path]
+            print(f"Executando comando: {' '.join(cmd_list)}")
+            peer_process = subprocess.Popen(cmd_list, creationflags=flags)
+            
+        peer_processes.append(peer_process)
+        print(f"{peer_id} iniciado (PID: {peer_process.pid}).")
+        time.sleep(0.8)  # Pequena pausa entre o início dos peers
+        
     return peer_processes
 
 
@@ -169,4 +211,3 @@ if __name__ == "__main__":
         # shutil.rmtree(BASE_SHARED_DIR, ignore_errors=True)
         # print(f"Limpando diretório base de downloads: {BASE_DOWNLOAD_DIR}")
         # shutil.rmtree(BASE_DOWNLOAD_DIR, ignore_errors=True)
-
