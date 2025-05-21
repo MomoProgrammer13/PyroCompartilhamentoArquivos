@@ -1,4 +1,3 @@
-# peer.py
 import Pyro5.api
 import Pyro5.errors
 import threading
@@ -13,7 +12,7 @@ from constants import (
     QUORUM, MAX_EPOCH_SEARCH, DOWNLOAD_CHUNK_SIZE, ELECTION_REQUEST_TIMEOUT
 )
 
-# Configuração básica de logging
+# configuração básica de logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(peer_id)s - %(message)s')
 
 
@@ -21,28 +20,28 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 @Pyro5.api.behavior(instance_mode="single")
 class Peer:
     def __init__(self, peer_id, shared_folder_path):
-        self.peer_id = peer_id # Deve ser definido antes de configurar o logger específico
+        self.peer_id = peer_id
 
-        # Configuração do logging para ficheiro específico do peer
+        # configuração do logging para o arquivo deste peer
         log_dir = "logs"
-        os.makedirs(log_dir, exist_ok=True)  # Cria o diretório de logs se não existir
+        os.makedirs(log_dir, exist_ok=True)  # cria o diretório de logs caso não exista
         self.log_file_path = os.path.join(log_dir, f"{self.peer_id}_app.log")
 
-        # Remove handlers existentes do root logger para evitar duplicação ou conflitos
-        # e configura o logging para este processo de peer
+        # remove handlers antigos do logger raiz para evitar logs duplicados
         for handler in logging.root.handlers[:]:
             logging.root.removeHandler(handler)
         
-        logging.basicConfig(level=logging.INFO,
-                            format='%(asctime)s - %(levelname)s - %(peer_id)s - %(message)s',
-                            filename=self.log_file_path,
-                            filemode='w') # 'w' para sobrescrever o log a cada execução
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(peer_id)s - %(message)s',
+            filename=self.log_file_path,
+            filemode='w'  # sobrescreve o log a cada execução
+        )
 
         self.logger = logging.LoggerAdapter(logging.getLogger(__name__), {'peer_id': self.peer_id})
 
         self.uri = None
         self.pyro_daemon = None
-        # self.ns_proxy = None # Removido para forçar a obtenção local de proxies do NS
 
         self.shared_folder = os.path.abspath(shared_folder_path)
         os.makedirs(self.shared_folder, exist_ok=True)
@@ -53,13 +52,13 @@ class Peer:
         self.current_tracker_proxy = None
         self.current_tracker_epoch = 0
 
-        # Atributos de Eleição
-        self.candidate_for_epoch = 0  # Sinaliza se o peer está ativamente buscando votos (0 = não candidato)
-        self.candidate_for_epoch_value = 0  # Guarda a época para a qual a candidatura foi iniciada
+        # atributos de eleição
+        self.candidate_for_epoch = 0  # sinaliza se o peer está ativamente buscando votos (0 = não candidato)
+        self.candidate_for_epoch_value = 0  # guarda a época para a qual a candidatura foi iniciada
         self.votes_received_for_epoch = {}
         self.voted_in_epoch = {}
 
-        # Timers
+        # timers
         self.tracker_timeout_timer = None
         self.heartbeat_send_timer = None
         self.election_vote_collection_timer = None
@@ -68,11 +67,11 @@ class Peer:
         self.logger.info(f"Arquivos locais iniciais: {self.local_files}")
 
     def _setup_pyro(self):
-        """Configura o daemon PyRO e registra o peer."""
+        # configura o daemon Pyro e faz o registro no servidor de nomes
         try:
             self.pyro_daemon = Pyro5.server.Daemon(host=self._get_local_ip())
             self.uri = self.pyro_daemon.register(self)
-            # Obter um proxy NS local para registro inicial
+            # obter um proxy NS local para registro inicial
             ns_proxy_setup = Pyro5.api.locate_ns(host=NAMESERVER_HOST, port=NAMESERVER_PORT)
             ns_proxy_setup.register(f"{PEER_NAME_PREFIX}{self.peer_id}", self.uri)
             self.logger.info(f"Registrado no daemon PyRO com URI: {self.uri}")
@@ -86,11 +85,11 @@ class Peer:
             sys.exit(1)
 
     def _get_local_ip(self):
-        """Tenta obter o IP local para o daemon PyRO."""
+        # tenta descobrir o ip local para rodar o daemon
         return "localhost"
 
     def _scan_local_files(self):
-        """Verifica a pasta compartilhada e retorna uma lista de nomes de arquivos."""
+        # varre a pasta compartilhada e retorna lista de arquivos locais
         try:
             return [f for f in os.listdir(self.shared_folder) if os.path.isfile(os.path.join(self.shared_folder, f))]
         except Exception as e:
@@ -98,27 +97,27 @@ class Peer:
             return []
 
     def update_local_files_and_notify_tracker(self):
-        """Verifica arquivos locais, atualiza a lista e notifica o tracker se houver mudanças."""
+        # atualiza lista de arquivos locais e avisa o tracker sobre mudanças
         old_files = set(self.local_files)
         self.local_files = self._scan_local_files()
         new_files = set(self.local_files)
 
         if old_files != new_files:
             self.logger.info(f"Mudança nos arquivos locais detectada. Novos arquivos: {self.local_files}")
-            if self.current_tracker_uri_str and not self.is_tracker: # Modificado para usar URI
+            if self.current_tracker_uri_str and not self.is_tracker:  # modificado para usar URI
                 try:
-                    # Criar proxy localmente para esta operação, especialmente se chamado de um thread diferente (ex: CLI)
+                    # criar proxy localmente para esta operação, especialmente se chamado de um thread diferente
                     tracker_proxy_local = Pyro5.api.Proxy(self.current_tracker_uri_str)
-                    tracker_proxy_local._pyroTimeout = 5 # Definir timeout
+                    tracker_proxy_local._pyroTimeout = 5  # definir timeout
                     self.logger.info(
                         f"Notificando tracker {self.current_tracker_uri_str} (Época {self.current_tracker_epoch}) sobre mudança nos arquivos.")
-                    # A resposta do register_files pode indicar se a época está baixa
+                    # a resposta do register_files pode indicar se a época está baixa
                     response = tracker_proxy_local.register_files(self.peer_id, str(self.uri), self.local_files,
-                                                                         self.current_tracker_epoch)
+                                                                  self.current_tracker_epoch)
                     if isinstance(response, dict) and response.get("status") == "epoch_too_low":
                         self.logger.warning(
                             f"Tracker informou que minha época ({self.current_tracker_epoch}) é muito baixa. Tracker atual é época {response.get('current_tracker_epoch')}. Tentando reconectar/descobrir.")
-                        self._discover_tracker()  # Força nova descoberta
+                        self._discover_tracker()  # força nova descoberta
                 except Pyro5.errors.CommunicationError:
                     self.logger.warning(
                         "Falha ao notificar tracker sobre mudança nos arquivos (CommunicationError). Tracker pode estar offline.")
@@ -130,8 +129,7 @@ class Peer:
                 self._update_tracker_index_for_peer(self.peer_id, str(self.uri), self.local_files)
 
     def _discover_tracker(self):
-        """Tenta encontrar o tracker atual no servidor de nomes.
-        Se for Peer1 e nenhum tracker for encontrado, torna-se o tracker inicial."""
+        # busca um tracker ativo no servidor de nomes e conecta a ele
         self.logger.info("Procurando por um tracker ativo...")
         latest_epoch_found = -1
         tracker_uri_to_connect = None
@@ -141,28 +139,28 @@ class Peer:
             ns_proxy_local_discover = Pyro5.api.locate_ns(host=NAMESERVER_HOST, port=NAMESERVER_PORT)
         except Pyro5.errors.NamingError:
             self.logger.error(f"Servidor de nomes não encontrado em _discover_tracker.")
-            # A lógica de eleição ou Peer1 se tornando tracker será acionada abaixo
-            pass # Permite que o código abaixo lide com ns_proxy_local_discover sendo None
+            # a lógica de eleição ou Peer1 se tornando tracker será acionada abaixo
+            pass  # permite que o código abaixo lide com ns_proxy_local_discover sendo None
 
         if ns_proxy_local_discover:
-            # Procura do tracker com a maior época válida
-            for i in range(MAX_EPOCH_SEARCH, -1, -1):  # Começa da época mais alta possível
+            # procura do tracker com a maior época válida
+            for i in range(MAX_EPOCH_SEARCH, -1, -1):  # começa da época mais alta possível
                 tracker_name_to_find = f"{TRACKER_BASE_NAME}{i}"
                 uri_obj_from_ns = None
                 try:
                     uri_obj_from_ns = ns_proxy_local_discover.lookup(tracker_name_to_find)
                     if uri_obj_from_ns:
-                        # Criar um novo proxy para o tracker candidato no thread atual, usando str(uri_obj_from_ns)
+                        # criar um novo proxy para o tracker candidato no thread atual, usando str(uri_obj_from_ns)
                         temp_proxy = Pyro5.api.Proxy(str(uri_obj_from_ns))
-                        temp_proxy._pyroTimeout = 1.5  # Timeout curto para ping
+                        temp_proxy._pyroTimeout = 1.5  # timeout curto para ping
                         temp_proxy.ping()
 
                         latest_epoch_found = i
-                        tracker_uri_to_connect = uri_obj_from_ns # Armazena o objeto URI original
+                        tracker_uri_to_connect = uri_obj_from_ns  # armazena o objeto URI original
                         self.logger.info(f"Tracker encontrado: {tracker_name_to_find} com URI {uri_obj_from_ns} (Época {i}).")
-                        break  # Encontrou o mais recente, para a busca
+                        break  # encontrou o mais recente, para a busca
                 except Pyro5.errors.NamingError:
-                    continue  # Tracker para esta época não encontrado no NS
+                    continue  # tracker para esta época não encontrado no NS
                 except Pyro5.errors.CommunicationError:
                     self.logger.warning(
                         f"Tracker {tracker_name_to_find} (URI {uri_obj_from_ns if uri_obj_from_ns else 'desconhecido'}) encontrado no NS, mas não respondeu ao ping. Considerando-o falho.")
@@ -170,14 +168,14 @@ class Peer:
                 except Exception as e:
                     self.logger.warning(f"Erro ao tentar conectar/pingar ao tracker {tracker_name_to_find} (URI {uri_obj_from_ns if uri_obj_from_ns else 'desconhecido'}): {e}")
                     continue
-        else: # ns_proxy_local_discover is None
+        else:  # ns_proxy_local_discover is None
             self.logger.warning("Não foi possível conectar ao servidor de nomes durante a descoberta de tracker.")
 
 
         if tracker_uri_to_connect:
             self._connect_to_tracker(tracker_uri_to_connect, latest_epoch_found)
         else:
-            # Nenhum tracker ativo encontrado após varredura
+            # nenhum tracker ativo encontrado após varredura
             if self.peer_id == "Peer1" and self.current_tracker_epoch == 0 and latest_epoch_found == -1:
                 initial_epoch_for_peer1 = 1
                 self.logger.info(
@@ -190,40 +188,40 @@ class Peer:
                     ns_proxy_check_peer1.lookup(f"{TRACKER_BASE_NAME}{initial_epoch_for_peer1}")
                     self.logger.info(
                         f"Um tracker para a Época {initial_epoch_for_peer1} já foi registrado por outro peer enquanto eu verificava. Iniciando eleição normal.")
-                    can_become_tracker = False # Outro peer foi mais rápido
+                    can_become_tracker = False  # outro peer foi mais rápido
                 except Pyro5.errors.NamingError:
-                    # A Época 1 não está registrada, Peer1 pode assumir (se ns_proxy_check_peer1 foi obtido).
-                    if not ns_proxy_check_peer1: # Falha ao conectar ao NS
-                        self.logger.warning(f"Servidor de nomes inacessível ao tentar verificar {TRACKER_BASE_NAME}{initial_epoch_for_peer1} para Peer1. Não posso me tornar tracker.")
+                    # a Época 1 não está registrada, Peer1 pode assumir (se ns_proxy_check_peer1 foi obtido)
+                    if not ns_proxy_check_peer1:  # falha ao conectar ao NS
+                        self.logger.warning(f"Servidor de nomes inacessível ao tentar verificar {TRACKER_BASE_NAME}{initial_epoch_for_peer1} para Peer1. N��o posso me tornar tracker.")
                         can_become_tracker = False
                 except Exception as e_check:
                     self.logger.error(f"Erro ao verificar tracker para Peer1: {e_check}")
-                    can_become_tracker = False # Erro, não assume
+                    can_become_tracker = False  # erro, não assume
 
                 if can_become_tracker:
                     self.logger.info(f"Assumindo como Tracker inicial da Época {initial_epoch_for_peer1}.")
                     self._become_tracker(initial_epoch_for_peer1)
                 else:
-                    self.initiate_election() # Se não pode se tornar tracker, inicia eleição
+                    self.initiate_election()  # se não pode se tornar tracker, inicia eleição
             else:
                 self.logger.info("Nenhum tracker ativo encontrado. Iniciando eleição.")
                 self.initiate_election()
 
     def _connect_to_tracker(self, tracker_uri, epoch):
-        """Conecta-se a um tracker existente."""
-        tracker_uri_str = str(tracker_uri) # Garantir que é string para comparações e proxy
+        # conecta ao tracker encontrado e registra arquivos
+        tracker_uri_str = str(tracker_uri)  # garantir que é string para comparações e proxy
         try:
-            # Se já estou conectado a este tracker e época, não faz nada
+            # se já estou conectado a este tracker e época, não faz nada
             if self.current_tracker_uri_str == tracker_uri_str and self.current_tracker_epoch == epoch:
                 self.logger.debug(f"Já conectado ao tracker {tracker_uri_str} da época {epoch}.")
-                if not self.is_tracker: self._start_tracker_timeout_detection()  # Garante que o timer está rodando
+                if not self.is_tracker: self._start_tracker_timeout_detection()  # garante que o timer está rodando
                 return
 
             self.logger.info(f"Tentando conectar ao Tracker {tracker_uri_str} (Época {epoch}).")
-            new_tracker_proxy = Pyro5.api.Proxy(tracker_uri_str) # Usar string URI
+            new_tracker_proxy = Pyro5.api.Proxy(tracker_uri_str)  # usar string URI
             new_tracker_proxy._pyroTimeout = 5
 
-            # Ping para confirmar que o novo tracker está realmente acessível antes de mudar
+            # ping para confirmar que o novo tracker está realmente acessível antes de mudar
             new_tracker_proxy.ping()
 
             self.current_tracker_uri_str = tracker_uri_str
@@ -235,7 +233,7 @@ class Peer:
                 self.logger.info(
                     f"Conectado ao Tracker_Epoca_{epoch} ({self.current_tracker_uri_str}). Registrando meus arquivos...")
 
-                # Cancela qualquer candidatura pendente se a época do tracker conectado for >= minha época de candidatura
+                # cancela qualquer candidatura pendente se a época do tracker conectado for >= minha época de candidatura
                 if hasattr(self, 'candidate_for_epoch_value') and \
                         self.candidate_for_epoch_value > 0 and \
                         self.candidate_for_epoch_value <= epoch:
@@ -243,7 +241,7 @@ class Peer:
                         f"Conectei ao tracker da época {epoch}. Cancelando minha candidatura pendente para época {self.candidate_for_epoch_value}.")
                     if self.election_vote_collection_timer and self.election_vote_collection_timer.is_alive():
                         self.election_vote_collection_timer.cancel()
-                    self.candidate_for_epoch = 0  # Não sou mais candidato ativo
+                    self.candidate_for_epoch = 0  # não sou mais candidato ativo
                     self.votes_received_for_epoch.pop(self.candidate_for_epoch_value, None)
                     self.candidate_for_epoch_value = 0
 
@@ -252,17 +250,17 @@ class Peer:
                 if isinstance(response, dict) and response.get("status") == "epoch_too_low":
                     self.logger.warning(
                         f"Ao registrar, tracker {self.current_tracker_uri_str} informou que minha época ({self.current_tracker_epoch}) é baixa. Tracker real é {response.get('current_tracker_epoch')}. Descobrindo novamente.")
-                    self._clear_current_tracker()  # Limpa o tracker incorreto
+                    self._clear_current_tracker()  # limpa o tracker incorreto
                     self.current_tracker_epoch = response.get('current_tracker_epoch',
-                                                              self.current_tracker_epoch)  # Atualiza para tentar a época correta
+                                                              self.current_tracker_epoch)  # atualiza para tentar a época correta
                     self._discover_tracker()
-                    return  # Evita iniciar timeout para tracker errado
+                    return  # evita iniciar timeout para tracker errado
 
                 self._start_tracker_timeout_detection()
-            else:  # Eu sou o tracker
+            else:  # eu sou o tracker
                 self.logger.info(f"Eu sou o Tracker_Epoca_{epoch}.")
-                self._stop_tracker_timeout_detection()  # Tracker não detecta a si mesmo
-                self._start_sending_heartbeats()  # Garante que está enviando heartbeats
+                self._stop_tracker_timeout_detection()  # tracker não detecta a si mesmo
+                self._start_sending_heartbeats()  # garante que está enviando heartbeats
 
         except Pyro5.errors.CommunicationError:
             self.logger.error(f"Falha de comunicação ao conectar/registrar com Tracker_Epoca_{epoch} ({tracker_uri}).")
@@ -274,17 +272,17 @@ class Peer:
             self.initiate_election()
 
     def _clear_current_tracker(self):
-        """Limpa as informações do tracker atual, exceto a época para futuras eleições."""
+        # limpa dados do tracker atual e cancela timers relacionados
         # self.logger.info(f"Limpando informações do tracker atual (URI: {self.current_tracker_uri_str}, Época: {self.current_tracker_epoch}).")
         self.current_tracker_uri_str = None
         self.current_tracker_proxy = None
-        if self.is_tracker:  # Se eu era o tracker
+        if self.is_tracker:  # se eu era o tracker
             self._stop_sending_heartbeats()
         self.is_tracker = False
         self._stop_tracker_timeout_detection()
 
     def _handle_tracker_communication_error(self):
-        """Lida com erros de comunicação com o tracker atual."""
+        # trata falhas de comunicação com o tracker e inicia eleição
         tracker_uri_at_error = self.current_tracker_uri_str
         tracker_epoch_at_error = self.current_tracker_epoch
         self.logger.warning(
@@ -294,14 +292,14 @@ class Peer:
             self.logger.info("Eu era o tracker e detectei um problema. Parando atividades de tracker.")
 
         self._clear_current_tracker()
-        # Mantém current_tracker_epoch com o valor da época do tracker que falhou,
+        # mantém current_tracker_epoch com o valor da época do tracker que falhou,
         # para que a próxima eleição seja para uma época superior.
         self.current_tracker_epoch = tracker_epoch_at_error
         self.initiate_election()
 
-    # --- Lógica de Eleição ---
+    # lógica de eleição
     def initiate_election(self):
-        """Inicia uma nova eleição para tracker."""
+        # começa processo de eleição para escolher novo tracker
         if self.election_vote_collection_timer and self.election_vote_collection_timer.is_alive():
             self.election_vote_collection_timer.cancel()
 
@@ -315,18 +313,18 @@ class Peer:
 
         new_election_epoch = max_known_epoch + 1
 
-        # Se já sou candidato para esta nova época (improvável, mas para evitar loop)
+        # se já sou candidato para esta nova época (improvável, mas para evitar loop)
         if self.candidate_for_epoch == 1 and self.candidate_for_epoch_value == new_election_epoch:
             self.logger.info(f"Já sou candidato para a época {new_election_epoch}. Aguardando resultado.")
             return
 
-        self.candidate_for_epoch = 1  # Sinaliza que estou ativamente buscando votos
+        self.candidate_for_epoch = 1  # sinaliza que estou ativamente buscando votos
         self.candidate_for_epoch_value = new_election_epoch
-        self.candidate_for_epoch_value_history = new_election_epoch  # Guarda a maior época tentada
+        self.candidate_for_epoch_value_history = new_election_epoch  # guarda a maior época tentada
 
         self.logger.info(f"Iniciando eleição para Tracker_Epoca_{self.candidate_for_epoch_value}.")
 
-        # Vota em si mesmo para a nova época da candidatura
+        # vota em si mesmo para a nova época da candidatura
         self.votes_received_for_epoch[self.candidate_for_epoch_value] = {str(self.uri)}
         self.voted_in_epoch[self.candidate_for_epoch_value] = str(self.uri)
 
@@ -337,19 +335,19 @@ class Peer:
             return
         elif not other_peer_uris:
             self.logger.info(f"Nenhum outro peer encontrado. Quorum é {QUORUM}, preciso de mais peers para me eleger.")
-            # A eleição vai falhar no _check_election_results por falta de votos.
-            # O timer de eleição irá expirar e chamar _check_election_results.
-            pass  # Continua para iniciar o timer de coleta
+            # a eleição vai falhar no _check_election_results por falta de votos.
+            # o timer de eleição irá expirar e chamar _check_election_results.
+            pass  # continua para iniciar o timer de coleta
 
         self.logger.info(
             f"Solicitando votos de {len(other_peer_uris)} peers para época {self.candidate_for_epoch_value}.")
         for peer_uri_str in other_peer_uris:
-            # Não envia para si mesmo (já tratado em _get_other_peer_uris)
+            # não envia para si mesmo (já tratado em _get_other_peer_uris)
             try:
 
                 # peer_proxy = Pyro5.api.Proxy(peer_uri_str)
                 # peer_proxy._pyroTimeout = 2
-                # Passa self.candidate_for_epoch_value que é a época correta da eleição
+                # passa self.candidate_for_epoch_value que é a época correta da eleição
                 threading.Thread(target=self._send_vote_request_to_peer,
                                  args=(None, peer_uri_str, self.candidate_for_epoch_value)).start()
             except Exception as e:
@@ -362,12 +360,12 @@ class Peer:
         self.election_vote_collection_timer.start()
 
     def _send_vote_request_to_peer(self, peer_proxy, peer_uri_str, election_epoch_of_request):
-        # peer_proxy é passado como None, então criamos um novo aqui
+        # monta proxy e solicita voto de outro peer
         local_peer_proxy = None
         try:
             local_peer_proxy = Pyro5.api.Proxy(peer_uri_str)
             local_peer_proxy._pyroTimeout = 2
-            # Verifica se ainda sou candidato para ESTA época específica antes de enviar
+            # verifica se ainda sou candidato para ESTA época específica antes de enviar
             if self.candidate_for_epoch == 0 or self.candidate_for_epoch_value != election_epoch_of_request:
                 self.logger.info(
                     f"Minha candidatura para época {election_epoch_of_request} foi cancelada/mudou. Não solicitando voto de {peer_uri_str}.")
@@ -376,7 +374,7 @@ class Peer:
             self.logger.info(f"Solicitando voto de {peer_uri_str} para época {election_epoch_of_request}")
             vote_granted = local_peer_proxy.request_vote(str(self.uri), election_epoch_of_request)
 
-            # Verifica novamente após o retorno, pois o estado pode ter mudado
+            # verifica novamente após o retorno, pois o estado pode ter mudado
             if self.candidate_for_epoch == 0 or self.candidate_for_epoch_value != election_epoch_of_request:
                 self.logger.info(
                     f"Recebi resposta de voto de {peer_uri_str} para {election_epoch_of_request}, mas minha candidatura mudou/foi cancelada.")
@@ -384,9 +382,9 @@ class Peer:
 
             if vote_granted:
                 self.logger.info(f"Voto recebido de {peer_uri_str} para época {election_epoch_of_request}.")
-                # Garante que a estrutura de votos existe para esta época
+                # garante que a estrutura de votos existe para esta época
                 if election_epoch_of_request not in self.votes_received_for_epoch:
-                    self.votes_received_for_epoch[election_epoch_of_request] = set()  # Inicializa se não existir
+                    self.votes_received_for_epoch[election_epoch_of_request] = set()  # inicializa se não existir
                 self.votes_received_for_epoch[election_epoch_of_request].add(peer_uri_str)
             else:
                 self.logger.info(f"Voto negado por {peer_uri_str} para época {election_epoch_of_request}.")
@@ -398,20 +396,20 @@ class Peer:
 
     @Pyro5.api.expose
     def request_vote(self, candidate_uri_str, election_epoch):
-        """Recebe um pedido de voto de outro peer."""
+        # avalia pedido de voto e decide se concede ou nega
         self.logger.info(f"Pedido de voto recebido de {candidate_uri_str} para Tracker_Epoca_{election_epoch}.")
         self.logger.info(
             f"Meu estado: current_tracker_epoch={self.current_tracker_epoch}, voted_in_epoch[{election_epoch}]={self.voted_in_epoch.get(election_epoch)}, current_tracker_uri={self.current_tracker_uri_str}, sou_candidato_para_epoca={self.candidate_for_epoch_value if self.candidate_for_epoch else 'Nao'}")
 
-        # Regra 1: Época da eleição vs época do tracker atual
-        # Nega se a eleição for para uma época estritamente menor que a do meu tracker ativo.
+        # regra 1: época da eleição vs época do tracker atual
+        # nega se a eleição for para uma época estritamente menor que a do meu tracker ativo.
         if election_epoch < self.current_tracker_epoch and self.current_tracker_uri_str is not None:
             self.logger.info(
                 f"Voto negado (Regra 1): época da eleição ({election_epoch}) é menor que a do tracker atual ({self.current_tracker_epoch}) que considero ativo.")
             return False
 
-        # Regra 2: Época da eleição vs tracker ativo na mesma época
-        # Nega se a eleição for para a mesma época do meu tracker ativo, e o candidato não for esse tracker.
+        # regra 2: época da eleição vs tracker ativo na mesma época
+        # nega se a eleição for para a mesma época do meu tracker ativo, e o candidato não for esse tracker.
         if election_epoch == self.current_tracker_epoch and \
                 self.current_tracker_uri_str is not None and \
                 self.current_tracker_uri_str != candidate_uri_str:
@@ -419,23 +417,23 @@ class Peer:
                 f"Voto negado (Regra 2): época da eleição ({election_epoch}) é a mesma do tracker atual ({self.current_tracker_uri_str}) que considero ativo, e candidato é outro.")
             return False
 
-        # Regra 3: Um voto por época, com desempate para candidatos na mesma época
+        # regra 3: um voto por época, com desempate para candidatos na mesma época
         if election_epoch in self.voted_in_epoch:
             current_voted_candidate_in_epoch = self.voted_in_epoch[election_epoch]
             if current_voted_candidate_in_epoch == candidate_uri_str:
                 self.logger.info(f"Já votei em {candidate_uri_str} para a época {election_epoch}. Confirmando voto.")
                 return True
 
-            # Lógica de desempate: Se eu votei em mim mesmo (porque sou/fui candidato para esta época)
-            # E o novo candidato (candidate_uri_str) tem um URI "menor" (critério de desempate).
+            # lógica de desempate: se eu votei em mim mesmo (porque sou/fui candidato para esta época)
+            # e o novo candidato (candidate_uri_str) tem um URI "menor" (critério de desempate).
             if current_voted_candidate_in_epoch == str(self.uri) and \
                     candidate_uri_str != str(self.uri) and \
-                    candidate_uri_str < str(self.uri):  # Comparação de strings de URI
+                    candidate_uri_str < str(self.uri):  # comparação de strings de URI
                 self.logger.info(
                     f"Eu votei em mim ({str(self.uri)}) para época {election_epoch}, mas {candidate_uri_str} tem URI menor. Mudando meu voto para {candidate_uri_str}.")
-                self.voted_in_epoch[election_epoch] = candidate_uri_str  # Mudo meu voto
+                self.voted_in_epoch[election_epoch] = candidate_uri_str  # mudo meu voto
 
-                # Cancelo minha candidatura ATIVA para esta época se eu era candidato para ela
+                # cancelo minha candidatura ATIVA para esta época se eu era candidato para ela
                 if self.candidate_for_epoch == 1 and self.candidate_for_epoch_value == election_epoch:
                     self.logger.info(
                         f"Cancelando minha candidatura ativa para época {election_epoch} porque votei em {candidate_uri_str} (URI menor).")
@@ -444,26 +442,26 @@ class Peer:
                     self.candidate_for_epoch = 0
                     self.votes_received_for_epoch.pop(election_epoch,
                                                       None)
-                    # Remove votos da minha candidatura cancelada
+                    # remove votos da minha candidatura cancelada
                     # self.candidate_for_epoch_value pode ser mantido como histórico ou zerado. Se zerado, zera candidate_for_epoch_value_history também.
 
-                self._stop_tracker_timeout_detection()  # Participei ativamente, paro de monitorar o antigo.
-                return True  # Voto concedido ao candidato com URI menor
+                self._stop_tracker_timeout_detection()  # participei ativamente, paro de monitorar o antigo.
+                return True  # voto concedido ao candidato com URI menor
             else:
-                # Já votei em mim e meu URI é menor/igual, OU já votei em outro que não o candidato atual.
+                # já votei em mim e meu URI é menor/igual, ou já votei em outro que não o candidato atual.
                 self.logger.info(
                     f"Voto negado (Regra 3b): já votei em {current_voted_candidate_in_epoch} para a época {election_epoch} e não mudarei (ou meu URI é menor/igual, ou já votei em terceiro).")
                 return False
 
-        # Se não votei ainda nesta época (cheguei aqui porque election_epoch not in self.voted_in_epoch)
-        # Concedo o voto.
+        # se não votei ainda nesta época (cheguei aqui porque election_epoch not in self.voted_in_epoch)
+        # concedo o voto.
         self.voted_in_epoch[election_epoch] = candidate_uri_str
         self.logger.info(
             f"Voto concedido para {candidate_uri_str} para Tracker_Epoca_{election_epoch} (primeiro voto nesta época).")
 
         self._stop_tracker_timeout_detection()
 
-        # Se eu era candidato para uma época X <= election_epoch, e estou votando em election_epoch (e não sou eu), cancelo X.
+        # se eu era candidato para uma época X <= election_epoch, e estou votando em election_epoch (e não sou eu), cancelo X.
         if self.candidate_for_epoch == 1 and \
                 self.candidate_for_epoch_value > 0 and \
                 self.candidate_for_epoch_value <= election_epoch and \
@@ -478,7 +476,7 @@ class Peer:
         return True
 
     def _check_election_results(self):
-        """Verifica se o quórum foi atingido para a eleição atual."""
+        # checa resultados da eleição e decide se virei tracker
         election_epoch_being_checked = self.candidate_for_epoch_value
 
         if self.candidate_for_epoch == 0 or election_epoch_being_checked == 0:
@@ -488,7 +486,7 @@ class Peer:
 
         if election_epoch_being_checked not in self.votes_received_for_epoch:
             self.logger.info(f"Nenhum voto registrado para minha candidatura da época {election_epoch_being_checked}.")
-            self.candidate_for_epoch = 0  # Deixa de ser candidato ativo para esta tentativa
+            self.candidate_for_epoch = 0  # deixa de ser candidato ativo para esta tentativa
             return
 
         num_votes = len(self.votes_received_for_epoch.get(election_epoch_being_checked, set()))
@@ -501,19 +499,19 @@ class Peer:
         else:
             self.logger.info(
                 f"Quórum não atingido para época {election_epoch_being_checked}. Eleição falhou para esta tentativa.")
-            # Não remove o voto de self.voted_in_epoch[election_epoch_being_checked] aqui, pois o voto foi dado.
-            # Apenas limpa os votos recebidos para esta tentativa de candidatura.
+            # não remove o voto de self.voted_in_epoch[election_epoch_being_checked] aqui, pois o voto foi dado.
+            # apenas limpa os votos recebidos para esta tentativa de candidatura.
             self.votes_received_for_epoch.pop(election_epoch_being_checked, None)
 
-        # Independentemente do resultado, esta rodada de candidatura ativa terminou.
+        # independentemente do resultado, esta rodada de candidatura ativa terminou.
         self.candidate_for_epoch = 0
         # self.candidate_for_epoch_value é mantido em candidate_for_epoch_value_history para cálculo da próxima época.
 
     def _become_tracker(self, epoch):
-        """Este peer se torna o tracker."""
+        # assume o papel de tracker e registra no nameserver
         if self.is_tracker and self.current_tracker_epoch == epoch:
             self.logger.info(f"Já sou o tracker para a época {epoch}.")
-            return  # Já sou este tracker.
+            return  # já sou este tracker.
 
         self.logger.info(f"Tornando-me Tracker_Epoca_{epoch}.")
         ns_proxy_local_become = None
@@ -521,54 +519,54 @@ class Peer:
             ns_proxy_local_become = Pyro5.api.locate_ns(host=NAMESERVER_HOST, port=NAMESERVER_PORT)
         except Pyro5.errors.NamingError:
             self.logger.error(f"Falha ao conectar ao servidor de nomes em _become_tracker. Não é possível registrar como tracker.")
-            # Não deve tentar _step_down_as_tracker() aqui se nunca se tornou um.
-            # Apenas limpa o estado local se necessário e retorna.
-            self.is_tracker = False # Garante que não se considera tracker
+            # não deve tentar _step_down_as_tracker() aqui se nunca se tornou um.
+            # apenas limpa o estado local se necessário e retorna.
+            self.is_tracker = False  # garante que não se considera tracker
             return
 
-        # Atualiza o estado interno para ser o tracker
+        # atualiza o estado interno para ser o tracker
         self.is_tracker = True
         self.current_tracker_epoch = epoch
         self.current_tracker_uri_str = str(self.uri)
-        self.current_tracker_proxy = self  # Referência local para mim mesmo como tracker
+        self.current_tracker_proxy = self  # referência local para mim mesmo como tracker
 
-        # Limpa dados de candidaturas e votos recebidos, pois agora sou tracker
+        # limpa dados de candidaturas e votos recebidos, pois agora sou tracker
         self.candidate_for_epoch = 0
-        self.candidate_for_epoch_value = 0  # Zera a época da candidatura ativa
+        self.candidate_for_epoch_value = 0  # zera a época da candidatura ativa
         self.votes_received_for_epoch = {}
-        # self.voted_in_epoch é um histórico, não limpar totalmente. Mas para 'epoch', eu sou o tracker.
+        # self.voted_in_epoch é um histórico, não limpar totalmente. mas para 'epoch', eu sou o tracker.
 
         tracker_name = f"{TRACKER_BASE_NAME}{epoch}"
         try:
-            # Tenta remover um registro obsoleto deste mesmo nome (se houver) antes de registrar o novo.
+            # tenta remover um registro obsoleto deste mesmo nome (se houver) antes de registrar o novo.
             try:
                 existing_uri = ns_proxy_local_become.lookup(tracker_name)
-                if existing_uri != self.uri: # Compara com self.uri (objeto URI)
+                if existing_uri != self.uri:  # compara com self.uri (objeto URI)
                     self.logger.warning(
                         f"Já existe um registro para {tracker_name} com URI {existing_uri} (diferente do meu). Tentando remover e registrar o meu.")
-                    ns_proxy_local_become.remove(tracker_name)  # Tenta remover o antigo
-                elif str(existing_uri) == str(self.uri): # Compara strings de URI
+                    ns_proxy_local_become.remove(tracker_name)  # tenta remover o antigo
+                elif str(existing_uri) == str(self.uri):  # compara strings de URI
                     self.logger.info(f"Já estou registrado como {tracker_name}. Apenas confirmando.")
 
             except Pyro5.errors.NamingError:
-                pass  # Nome não existe, ótimo.
+                pass  # nome não existe, ótimo.
 
             ns_proxy_local_become.register(tracker_name, self.uri)
             self.logger.info(f"Registrado no servidor de nomes como {tracker_name} (URI: {self.uri}).")
         except Exception as e:
             self.logger.error(f"Falha ao registrar como {tracker_name} no servidor de nomes: {e}")
-            self._step_down_as_tracker()  # Renuncia se não conseguir se registrar
+            self._step_down_as_tracker()  # renuncia se não conseguir se registrar
             return
 
-        self.file_index = {}  # Reinicia o índice de arquivos do tracker
+        self.file_index = {}  # reinicia o índice de arquivos do tracker
         self._update_tracker_index_for_peer(self.peer_id, str(self.uri),
-                                            self.local_files)  # Adiciona meus próprios arquivos
+                                            self.local_files)  # adiciona meus próprios arquivos
 
         self._stop_tracker_timeout_detection()
         self._start_sending_heartbeats()
 
     def _step_down_as_tracker(self):
-        """Peer renuncia ao posto de tracker."""
+        # renuncia ao tracker e remove registro do servidor de nomes
         if not self.is_tracker:
             return
 
@@ -580,9 +578,9 @@ class Peer:
         ns_proxy_local_stepdown = None
         try:
             ns_proxy_local_stepdown = Pyro5.api.locate_ns(host=NAMESERVER_HOST, port=NAMESERVER_PORT)
-            # Só remove se o URI no NS for o meu. Evita remover registro de outro tracker.
+            # só remove se o URI no NS for o meu. evita remover registro de outro tracker.
             registered_uri = ns_proxy_local_stepdown.lookup(tracker_name)
-            if str(registered_uri) == str(self.uri): # Compara strings de URI
+            if str(registered_uri) == str(self.uri):  # compara strings de URI
                 ns_proxy_local_stepdown.remove(tracker_name)
                 self.logger.info(f"Removido {tracker_name} (meu registro) do servidor de nomes.")
             else:
@@ -595,24 +593,24 @@ class Peer:
         except Exception as e:
             self.logger.error(f"Erro ao tentar remover/verificar {tracker_name} do NS: {e}")
 
-        # Mantém current_tracker_epoch com o valor da época em que fui tracker,
+        # mantém current_tracker_epoch com o valor da época em que fui tracker,
         # para que _clear_current_tracker não a perca e a próxima descoberta/eleição use-a como base.
         self._clear_current_tracker()
-        self.current_tracker_epoch = epoch_i_was_tracker  # Restaura a época que eu era, para base da próxima eleição/descoberta
+        self.current_tracker_epoch = epoch_i_was_tracker  # restaura a época que eu era, para base da próxima eleição/descoberta
 
         self.logger.info("Após renunciar, vou tentar descobrir um novo tracker ou participar de eleição.")
         self._discover_tracker()
 
-    # --- Heartbeat e Detecção de Falha ---
+    # heartbeat e detecção de falha
     def _start_tracker_timeout_detection(self):
-        """Inicia/reinicia o timer para detectar falha do tracker."""
+        # agenda timer para monitorar falhas do tracker
         if self.is_tracker:
             self._stop_tracker_timeout_detection()
             return
 
         self._stop_tracker_timeout_detection()
 
-        if self.current_tracker_proxy and self.current_tracker_uri_str:  # Só inicia se tiver um tracker definido
+        if self.current_tracker_proxy and self.current_tracker_uri_str:  # só inicia se tiver um tracker definido
             timeout = random.uniform(TRACKER_DETECTION_TIMEOUT_MIN, TRACKER_DETECTION_TIMEOUT_MAX)
             self.tracker_timeout_timer = threading.Timer(timeout, self._handle_tracker_timeout)
             self.tracker_timeout_timer.daemon = True
@@ -623,16 +621,16 @@ class Peer:
             self.logger.debug("Não iniciando timer de detecção de falha: nenhum tracker atual definido.")
 
     def _stop_tracker_timeout_detection(self):
-        """Para o timer de detecção de falha do tracker."""
+        # cancela timer de detecção de falha
         if self.tracker_timeout_timer and self.tracker_timeout_timer.is_alive():
             self.tracker_timeout_timer.cancel()
             self.logger.debug("Timer de detecção de falha do tracker parado.")
 
     def _handle_tracker_timeout(self):
-        """Chamado quando o timer de detecção de falha do tracker expira."""
-        if self.is_tracker: return  # Se eu me tornei tracker enquanto o timer estava rodando
+        # executa ao expirar timer de falha do tracker e inicia eleição
+        if self.is_tracker: return  # se eu me tornei tracker enquanto o timer estava rodando
 
-        # Verifica se o tracker que deu timeout é realmente o que estávamos monitorando
+        # verifica se o tracker que deu timeout é realmente o que estávamos monitorando
         if self.current_tracker_proxy is None or self.current_tracker_uri_str is None:
             self.logger.info(
                 "Timeout do tracker, mas já não há tracker atual definido (pode ter mudado). Ignorando este timeout.")
@@ -644,12 +642,12 @@ class Peer:
             f"Timeout: Tracker {tracker_uri_timed_out} (Epoca {epoch_timed_out}) não respondeu (ou não enviou heartbeat válido).")
 
         self._clear_current_tracker()
-        self.current_tracker_epoch = epoch_timed_out  # Mantém a época do tracker que falhou como base
+        self.current_tracker_epoch = epoch_timed_out  # mantém a época do tracker que falhou como base
 
         self.initiate_election()
 
     def _start_sending_heartbeats(self):
-        """Inicia o envio periódico de heartbeats (se for tracker)."""
+        # começa a enviar heartbeats periodicamente se eu for tracker
         if not self.is_tracker:
             return
 
@@ -660,7 +658,7 @@ class Peer:
                 self._send_heartbeat_and_reschedule()
             else:
                 self.logger.info("Não sou mais tracker, parando envio de heartbeats agendado.")
-                self._heartbeat_logging_once = False  # Reseta flag de log
+                self._heartbeat_logging_once = False  # reseta flag de log
 
         self.heartbeat_send_timer = threading.Timer(HEARTBEAT_INTERVAL, heartbeat_wrapper)
         self.heartbeat_send_timer.daemon = True
@@ -671,14 +669,14 @@ class Peer:
             self._heartbeat_logging_once = True
 
     def _stop_sending_heartbeats(self):
-        """Para o envio de heartbeats."""
+        # interrompe envio de heartbeats
         if self.heartbeat_send_timer and self.heartbeat_send_timer.is_alive():
             self.heartbeat_send_timer.cancel()
             self.logger.info("Tracker: Envio de heartbeats parado.")
             self._heartbeat_logging_once = False
 
     def _send_heartbeat_and_reschedule(self):
-        """Envia um heartbeat para todos os peers e agenda o próximo."""
+        # envia heartbeat e já prepara o próximo envio
         if not self.is_tracker:
             self.logger.info("Tentativa de enviar heartbeat, mas não sou mais tracker.")
             return
@@ -687,7 +685,7 @@ class Peer:
         other_peer_uris = self._get_other_peer_uris()
 
         for peer_uri_str in other_peer_uris:
-            # Não envia para si mesmo (já filtrado em _get_other_peer_uris)
+            # não envia para si mesmo (já filtrado em _get_other_peer_uris)
             try:
                 # peer_proxy = Pyro5.api.Proxy(peer_uri_str)
                 # peer_proxy._pyroTimeout = 0.5
@@ -697,11 +695,10 @@ class Peer:
                 self.logger.warning(f"Tracker: Falha ao criar proxy para {peer_uri_str} para enviar heartbeat: {e}")
 
         if self.is_tracker:
-            self._start_sending_heartbeats()  # Reagenda o próximo
+            self._start_sending_heartbeats()  # reagenda o próximo
 
     def _safe_send_heartbeat_to_one_peer(self, peer_proxy, target_peer_uri_str, tracker_uri_str, tracker_epoch):
-        """Função wrapper para enviar heartbeat a um peer individualmente com tratamento de erro."""
-        # peer_proxy é passado como None, criamos um novo aqui
+        # tenta enviar heartbeat a um peer e captura falhas sem interromper o tracker
         local_target_proxy = None
         try:
             local_target_proxy = Pyro5.api.Proxy(target_peer_uri_str)
@@ -715,14 +712,14 @@ class Peer:
 
     @Pyro5.api.expose
     def receive_heartbeat(self, incoming_tracker_uri_str, incoming_tracker_epoch):
-        """Recebe um heartbeat de um tracker."""
+        # processa heartbeat recebido e decide se mantenho ou renuncio
         self.logger.debug(
             f"Heartbeat recebido de {incoming_tracker_uri_str} (Epoca {incoming_tracker_epoch}). Meu tracker: {self.current_tracker_uri_str} (Epoca {self.current_tracker_epoch}). Sou tracker: {self.is_tracker}")
 
-        if self.is_tracker:  # Se eu sou um tracker
-            if incoming_tracker_uri_str == str(self.uri):  # Heartbeat de mim mesmo (não deveria ocorrer)
+        if self.is_tracker:  # se eu sou um tracker
+            if incoming_tracker_uri_str == str(self.uri):  # heartbeat de mim mesmo (não deveria ocorrer)
                 return
-            # Recebi heartbeat de OUTRO tracker. Conflito!
+            # recebi heartbeat de OUTRO tracker. conflito!
             if incoming_tracker_epoch > self.current_tracker_epoch:
                 self.logger.warning(
                     f"Sou Tracker (Época {self.current_tracker_epoch}), mas recebi heartbeat de {incoming_tracker_uri_str} (Época {incoming_tracker_epoch}). Época dele é MAIOR. Renunciando.")
@@ -730,7 +727,7 @@ class Peer:
                 # _step_down_as_tracker chamará _discover_tracker, que deve encontrar o novo tracker.
                 return
             elif incoming_tracker_epoch == self.current_tracker_epoch:
-                # Conflito na mesma época. Desempate por URI.
+                # conflito na mesma época. desempate por URI.
                 if incoming_tracker_uri_str < str(self.uri):
                     self.logger.warning(
                         f"Sou Tracker (Época {self.current_tracker_epoch}), mas recebi heartbeat de {incoming_tracker_uri_str} (MESMA época) com URI MENOR. Renunciando.")

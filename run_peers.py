@@ -4,49 +4,48 @@ import time
 import os
 import sys
 import shutil
-import base64  # Adicionar import
+import base64  # adicionar import
 from constants import NAMESERVER_HOST, NAMESERVER_PORT, TOTAL_PEERS_EXPECTED
 
-# --- Configurações ---
-PYTHON_EXECUTABLE = sys.executable  # Usa o mesmo executável Python que está rodando este script
-PEER_SCRIPT_PATH = "peer.py"  # Caminho para o script peer.py
-BASE_SHARED_DIR = "p2p_shared_folders"  # Pasta base para os diretórios compartilhados dos peers
-BASE_DOWNLOAD_DIR = "p2p_download_folders"  # Pasta base para os downloads dos peers
-LOGS_DIR = "logs" # Pasta base para os ficheiros de log dos peers
+# --- configurações ---
+PYTHON_EXECUTABLE = sys.executable  # usa o mesmo executável Python que está rodando este script
+PEER_SCRIPT_PATH = "peer.py"  # caminho para o script peer.py
+BASE_SHARED_DIR = "p2p_shared_folders"  # pasta base para os diretórios compartilhados dos peers
+BASE_DOWNLOAD_DIR = "p2p_download_folders"  # pasta base para os downloads dos peers
+LOGS_DIR = "logs" # pasta base para os ficheiros de log dos peers
 
-# Arquivos de exemplo para popular as pastas dos peers
+# arquivos de exemplo para popular as pastas dos peers
 EXAMPLE_FILES_CONTENT = {
-    "fileA.txt": "Conteúdo do arquivo A.",
-    "fileB.txt": "Conteúdo do arquivo B.",
-    "fileC.txt": "Conteúdo do arquivo C.",
-    "common.txt": "Este é um arquivo comum a vários peers."
+    "fileA.txt": "conteúdo do arquivo A.",
+    "fileB.txt": "conteúdo do arquivo B.",
+    "fileC.txt": "conteúdo do arquivo C.",
+    "common.txt": "este é um arquivo comum a vários peers."
 }
 
 
 def start_nameserver():
-    """Inicia o servidor de nomes PyRO em um novo processo."""
-    print(f"Iniciando servidor de nomes PyRO em {NAMESERVER_HOST}:{NAMESERVER_PORT}...")
+    """inicia o servidor de nomes PyRO em um novo processo."""
+    print(f"iniciando servidor de nomes PyRO em {NAMESERVER_HOST}:{NAMESERVER_PORT}...")
     try:
-        # Tenta verificar se já está rodando para evitar erro, mas é uma verificação simples.
-        # Idealmente, o próprio nameserver lida com múltiplas instâncias ou falha graciosamente.
+        # tenta iniciar o nameserver em background
         ns_process = subprocess.Popen(
             [PYTHON_EXECUTABLE, "-m", "Pyro5.nameserver", "-n", NAMESERVER_HOST, "-p", str(NAMESERVER_PORT)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL  # Suprime a saída do nameserver
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL  # suprime a saída do nameserver
         )
-        print(f"Servidor de nomes iniciado (PID: {ns_process.pid}). Aguardando inicialização...")
-        time.sleep(3)  # Dá um tempo para o servidor de nomes iniciar
+        print(f"servidor de nomes iniciado (pid: {ns_process.pid}), aguardando...")
+        time.sleep(3)  # dá um tempinho para subir
         return ns_process
     except Exception as e:
-        print(f"Erro ao iniciar o servidor de nomes: {e}")
-        print("Certifique-se que Pyro5 está instalado e o comando 'python -m Pyro5.nameserver' funciona.")
+        print(f"erro ao iniciar o servidor de nomes: {e}")
+        print("certifique-se que Pyro5 está instalado e o comando 'python -m Pyro5.nameserver' funciona.")
         return None
 
 
 def create_shared_folders_and_files(num_peers):
-    """Cria pastas compartilhadas e arquivos de exemplo para cada peer."""
+    """cria as pastas de compartilhamento e popula com arquivos de exemplo."""
     for dir_to_clean in [BASE_SHARED_DIR, BASE_DOWNLOAD_DIR, LOGS_DIR]:
         if os.path.exists(dir_to_clean):
-            print(f"Limpando diretório antigo: {dir_to_clean}")
+            print(f"limpando diretório antigo: {dir_to_clean}")
             shutil.rmtree(dir_to_clean)
         os.makedirs(dir_to_clean, exist_ok=True)
 
@@ -55,11 +54,11 @@ def create_shared_folders_and_files(num_peers):
         peer_shared_path = os.path.join(BASE_SHARED_DIR, peer_folder_name)
         os.makedirs(peer_shared_path, exist_ok=True)
 
-        # Cria alguns arquivos de exemplo
+        # cria alguns arquivos de exemplo
         with open(os.path.join(peer_shared_path, f"unique_to_peer{i}.txt"), 'w') as f:
-            f.write(f"Este é um arquivo único do Peer{i}.")
+            f.write(f"este é um arquivo único do Peer{i}.")
 
-        if i % 2 == 0:  # Peers pares têm fileA
+        if i % 2 == 0:  # peers pares têm fileA
             with open(os.path.join(peer_shared_path, "fileA.txt"), 'w') as f:
                 f.write(EXAMPLE_FILES_CONTENT["fileA.txt"] + f" (do Peer{i})")
         if i % 2 != 0:  # Peers ímpares têm fileB
@@ -76,7 +75,7 @@ def create_shared_folders_and_files(num_peers):
 
 
 def start_peers(num_peers):
-    """Inicia múltiplos processos de peers."""
+    """inicia múltiplos processos de peers."""
     peer_processes = []
     print(f"\nIniciando {num_peers} peers...")
 
@@ -88,7 +87,6 @@ def start_peers(num_peers):
             pwsh_exe = shutil.which("powershell.exe")
             if not pwsh_exe:
                 print("AVISO: Windows Terminal (wt.exe) está disponível, mas powershell.exe não foi encontrado no PATH. A visualização de logs dividida será desativada.")
-                # is_wt_available = False # Mantém is_wt_available, mas use_wt será falso abaixo se pwsh_exe for None
 
     for i in range(1, num_peers + 1):
         peer_id = f"Peer{i}"
@@ -98,23 +96,23 @@ def start_peers(num_peers):
         log_file_path = os.path.abspath(os.path.join(LOGS_DIR, f"{peer_id}_app.log"))
 
         cmd_list = []
-        # Só usa wt se estiver disponível E powershell.exe também estiver
+        # só usa wt se estiver disponível E powershell.exe também estiver
         use_wt = is_wt_available and pwsh_exe is not None
 
         if use_wt:
-            # Comando para executar a CLI do peer no painel superior
+            # comando para executar a CLI do peer no painel superior
             cmd_peer_cli_parts = [PYTHON_EXECUTABLE, abs_peer_script_path, peer_id, abs_shared_folder_path]
-            
-            # Comando para visualizar os logs no painel inferior
+
+            # comando para visualizar os logs no painel inferior
             ps_command_string = (
                 f"Write-Host '--- Logs para {peer_id} ({os.path.basename(log_file_path)}) ---' -ForegroundColor Cyan; "
                 f"Get-Content '{log_file_path}' -Wait -Tail 30"
             )
-            
-            # Codificar o comando PowerShell para Base64
+
+            # codificar o comando PowerShell para Base64
             ps_command_bytes = ps_command_string.encode('utf-16-le')
             ps_command_b64 = base64.b64encode(ps_command_bytes).decode('ascii')
-            
+
             cmd_log_viewer_parts = [pwsh_exe, "-NoProfile", "-NoExit", "-EncodedCommand", ps_command_b64]
 
             wt_cmd_list = [
@@ -136,15 +134,15 @@ def start_peers(num_peers):
                     print(f"Windows Terminal (wt.exe) disponível, mas powershell.exe não. Logs para {peer_id} em {log_file_path}. CLI em janela separada.")
                 else: # Mensagem genérica de fallback
                     print(f"Windows Terminal (wt.exe) não encontrado ou desativado. Logs para {peer_id} estarão em {log_file_path}. CLI em janela separada.")
-            
+
             cmd_list = [PYTHON_EXECUTABLE, PEER_SCRIPT_PATH, peer_id, shared_folder_path]
             print(f"Executando comando: {' '.join(cmd_list)}")
             peer_process = subprocess.Popen(cmd_list, creationflags=flags)
-            
+
         peer_processes.append(peer_process)
         print(f"{peer_id} iniciado (PID: {peer_process.pid}).")
         time.sleep(0.8)  # Pequena pausa entre o início dos peers
-        
+
     return peer_processes
 
 
