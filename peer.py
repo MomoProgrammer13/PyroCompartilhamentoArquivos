@@ -347,180 +347,289 @@ class Peer:
     # Lógica de eleição
     def initiate_election(self):
         # Começa processo de eleição para escolher novo tracker
+
+        # Se já existir um timer para coletar votos de uma eleição anterior, cancela-o.
+        # Isso evita que timers antigos interfiram na nova eleição.
         if self.election_vote_collection_timer and self.election_vote_collection_timer.is_alive():
             self.election_vote_collection_timer.cancel()
 
+        # Determina a maior época (epoch) que este peer conhece.
+        # Inicializa com a época do tracker atual que o peer conhecia.
         max_known_epoch = self.current_tracker_epoch
 
+        # Verifica se o peer já votou em alguma época e, se sim,
+        # atualiza max_known_epoch caso encontre uma época maior no histórico de votos.
         if self.voted_in_epoch:
             max_known_epoch = max(max_known_epoch, max(self.voted_in_epoch.keys(), default=-1))
 
+        # Verifica o histórico de épocas para as quais este peer já foi candidato.
+        # Atualiza max_known_epoch se uma época de candidatura anterior for maior.
+        # 'candidate_for_epoch_value_history' rastreia a maior época para a qual este peer tentou se candidatar.
         if hasattr(self, 'candidate_for_epoch_value_history') and self.candidate_for_epoch_value_history > 0:
             max_known_epoch = max(max_known_epoch, self.candidate_for_epoch_value_history)
 
+        # A nova eleição ocorrerá para a próxima época após a maior época conhecida.
         new_election_epoch = max_known_epoch + 1
 
+        # Se o peer já é um candidato ativo para esta nova época de eleição,
+        # não faz nada e apenas aguarda os resultados da eleição em andamento.
         if self.candidate_for_epoch == 1 and self.candidate_for_epoch_value == new_election_epoch:
             self.logger.info(f"Já sou candidato para a época {new_election_epoch}. Aguardando resultado.")
             return
 
-        self.candidate_for_epoch = 1
-        self.candidate_for_epoch_value = new_election_epoch
+        # Define este peer como candidato para a nova época de eleição.
+        self.candidate_for_epoch = 1  # Flag indicando que é um candidato.
+        self.candidate_for_epoch_value = new_election_epoch # A época para a qual está se candidatando.
+        # Atualiza o histórico da maior época para a qual este peer se candidatou.
         self.candidate_for_epoch_value_history = new_election_epoch
 
         self.logger.info(f"Iniciando eleição para Tracker_Epoca_{self.candidate_for_epoch_value}.")
 
+        # Registra o voto próprio: o candidato automaticamente vota em si mesmo.
+        # Inicializa o conjunto de votos recebidos para esta época, adicionando o próprio URI.
         self.votes_received_for_epoch[self.candidate_for_epoch_value] = {str(self.uri)}
+        # Marca que este peer votou em si mesmo para esta época.
         self.voted_in_epoch[self.candidate_for_epoch_value] = str(self.uri)
 
+        # Obtém uma lista dos URIs de outros peers na rede.
         other_peer_uris = self._get_other_peer_uris()
+
+        # Caso especial: se não houver outros peers e o quórum necessário for 1 ou menos,
+        # o peer tenta se eleger sozinho imediatamente.
         if not other_peer_uris and QUORUM <= 1:
             self.logger.info("Nenhum outro peer encontrado. Tentando me eleger sozinho (Quorum=1).")
-            self._check_election_results()
+            self._check_election_results() # Verifica imediatamente se pode se tornar tracker.
             return
+        # Se não houver outros peers e o quórum for maior que 1,
+        # o peer não pode se eleger sozinho e registra essa informação.
         elif not other_peer_uris:
             self.logger.info(f"Nenhum outro peer encontrado. Quorum é {QUORUM}, preciso de mais peers para me eleger.")
-            pass
+            # A eleição prosseguirá, mas provavelmente falhará se o QUORUM não for atingido.
+            # O timer _check_election_results ainda será configurado.
+            pass # Continua para configurar o timer de coleta de votos.
 
+        # Informa quantos peers serão contatados para solicitar votos.
         self.logger.info(
             f"Solicitando votos de {len(other_peer_uris)} peers para época {self.candidate_for_epoch_value}.")
+
+        # Envia solicitações de voto para todos os outros peers em threads separadas.
+        # Isso permite que as solicitações sejam feitas em paralelo, sem bloquear o peer candidato.
         for peer_uri_str in other_peer_uris:
             try:
+                # Cria uma nova thread para cada solicitação de voto.
+                # A função _send_vote_request_to_peer será executada na nova thread.
+                # args: URI do peer de quem solicitar o voto, e a época da eleição.
                 threading.Thread(target=self._send_vote_request_to_peer,
-                                 args=(peer_uri_str, self.candidate_for_epoch_value)).start()  # Removido peer_proxy
+                                 args=(peer_uri_str, self.candidate_for_epoch_value)).start()
             except Exception as e:
                 self.logger.error(f"Erro ao criar thread para solicitar voto de {peer_uri_str} durante eleição: {e}")
 
+        # Configura um timer para verificar os resultados da eleição após um certo tempo (ELECTION_REQUEST_TIMEOUT).
+        # Cancela qualquer timer anterior que possa estar ativo.
         if self.election_vote_collection_timer and self.election_vote_collection_timer.is_alive():
             self.election_vote_collection_timer.cancel()
+        # Cria um novo timer que chamará a função _check_election_results.
         self.election_vote_collection_timer = threading.Timer(ELECTION_REQUEST_TIMEOUT, self._check_election_results)
-        self.election_vote_collection_timer.daemon = True
-        self.election_vote_collection_timer.start()
+        self.election_vote_collection_timer.daemon = True # Permite que o programa saia mesmo se o timer estiver ativo.
+        self.election_vote_collection_timer.start() # Inicia o timer.
 
-    def _send_vote_request_to_peer(self, peer_uri_str, election_epoch_of_request):  # Removido peer_proxy
-        # Monta proxy e solicita voto de outro peer
-        local_peer_proxy = None
+    def _send_vote_request_to_peer(self, peer_uri_str,
+                                   election_epoch_of_request):
+
+        # Esta função é responsável por contatar outro peer e solicitar seu voto para uma eleição específica.
+
+        local_peer_proxy = None  # Inicializa a variável do proxy do peer.
         try:
+            # Cria um proxy para se comunicar com o peer especificado pelo URI.
+            # O proxy permite chamar métodos remotos no objeto do outro peer.
             local_peer_proxy = Pyro5.api.Proxy(peer_uri_str)
+            # Define um timeout curto para a chamada remota, para não bloquear por muito tempo se o peer não responder.
             local_peer_proxy._pyroTimeout = 2
+
+            # Antes de solicitar o voto, verifica se este peer (o solicitante) ainda é um candidato ativo
+            # para a época da eleição em questão.
+            # Se a candidatura foi cancelada ou mudou para outra época, não prossegue com a solicitação.
             if self.candidate_for_epoch == 0 or self.candidate_for_epoch_value != election_epoch_of_request:
                 self.logger.info(
                     f"Minha candidatura para época {election_epoch_of_request} foi cancelada/mudou. Não solicitando voto de {peer_uri_str}.")
-                return
+                return  # Encerra a função se não for mais um candidato válido.
 
+            # Loga a ação de solicitar o voto.
             self.logger.info(f"Solicitando voto de {peer_uri_str} para época {election_epoch_of_request}")
+            # Chama o método remoto 'request_vote' no peer de destino.
+            # Envia o URI do peer candidato (self.uri) e a época da eleição.
             vote_granted = local_peer_proxy.request_vote(str(self.uri), election_epoch_of_request)
 
+            # Após receber a resposta, verifica novamente se a candidatura ainda é válida.
+            # Isso é importante porque a resposta do voto pode demorar, e o estado da candidatura pode ter mudado nesse meio tempo.
             if self.candidate_for_epoch == 0 or self.candidate_for_epoch_value != election_epoch_of_request:
                 self.logger.info(
                     f"Recebi resposta de voto de {peer_uri_str} para {election_epoch_of_request}, mas minha candidatura mudou/foi cancelada.")
-                return
+                return  # Encerra se a candidatura não for mais válida.
 
+            # Se o voto foi concedido pelo outro peer:
             if vote_granted:
                 self.logger.info(f"Voto recebido de {peer_uri_str} para época {election_epoch_of_request}.")
+                # Garante que existe uma entrada no dicionário de votos recebidos para esta época.
                 if election_epoch_of_request not in self.votes_received_for_epoch:
                     self.votes_received_for_epoch[election_epoch_of_request] = set()
+                # Adiciona o URI do peer que concedeu o voto ao conjunto de votos recebidos para esta eleição.
                 self.votes_received_for_epoch[election_epoch_of_request].add(peer_uri_str)
             else:
+                # Se o voto foi negado.
                 self.logger.info(f"Voto negado por {peer_uri_str} para época {election_epoch_of_request}.")
         except Pyro5.errors.CommunicationError:
+            # Captura erros de comunicação com o peer (ex: peer offline, rede instável).
             self.logger.warning(
                 f"Falha ao solicitar voto de {peer_uri_str} para época {election_epoch_of_request} (CommunicationError).")
         except Exception as e:
+            # Captura quaisquer outros erros que possam ocorrer durante a solicitação de voto.
             self.logger.error(f"Erro ao solicitar voto de {peer_uri_str} para época {election_epoch_of_request}: {e}")
 
     @Pyro5.api.expose
     def request_vote(self, candidate_uri_str, election_epoch):
-        # Avalia pedido de voto e decide se concede ou nega
+        # Este método é chamado por um peer candidato para solicitar o voto deste peer em uma eleição.
+        # candidate_uri_str: O URI do peer que está se candidatando.
+        # election_epoch: A época (número sequencial) da eleição para a qual o voto está sendo solicitado.
+
         self.logger.info(f"Pedido de voto recebido de {candidate_uri_str} para Tracker_Epoca_{election_epoch}.")
+        # Log detalhado do estado atual do peer para ajudar na depuração da lógica de votação.
         self.logger.info(
             f"Meu estado: current_tracker_epoch={self.current_tracker_epoch}, voted_in_epoch[{election_epoch}]={self.voted_in_epoch.get(election_epoch)}, current_tracker_uri={self.current_tracker_uri_str}, sou_candidato_para_epoca={self.candidate_for_epoch_value if self.candidate_for_epoch else 'Nao'}")
 
+        # --- REGRA 1: Não votar em eleições para épocas passadas se já conheço um tracker ativo ---
+        # Se a época da eleição solicitada é anterior à época do tracker que este peer considera ativo,
+        # o voto é negado. Isso evita voltar para um estado anterior da rede.
         if election_epoch < self.current_tracker_epoch and self.current_tracker_uri_str is not None:
             self.logger.info(
                 f"Voto negado (Regra 1): época da eleição ({election_epoch}) é menor que a do tracker atual ({self.current_tracker_epoch}) que considero ativo.")
-            return False
+            return False  # Nega o voto.
 
+        # --- REGRA 2: Não votar se a eleição é para a mesma época do tracker ativo e o candidato é diferente ---
+        # Se a eleição é para a mesma época do tracker que este peer já considera ativo,
+        # e o candidato que está pedindo voto não é esse tracker ativo, o voto é negado.
+        # Isso dá preferência ao tracker já estabelecido para a época corrente.
         if election_epoch == self.current_tracker_epoch and \
                 self.current_tracker_uri_str is not None and \
                 self.current_tracker_uri_str != candidate_uri_str:
             self.logger.info(
                 f"Voto negado (Regra 2): época da eleição ({election_epoch}) é a mesma do tracker atual ({self.current_tracker_uri_str}) que considero ativo, e candidato é outro.")
-            return False
+            return False  # Nega o voto.
 
+        # --- REGRA 3: Lógica para quando já existe um voto registrado para a época da eleição ---
+        # Verifica se este peer já votou em alguém para a 'election_epoch'.
         if election_epoch in self.voted_in_epoch:
-            current_voted_candidate_in_epoch = self.voted_in_epoch[election_epoch]
+            current_voted_candidate_in_epoch = self.voted_in_epoch[election_epoch]  # Pega o URI em quem já votou.
+
+            # REGRA 3a: Se já votou no candidato atual, confirma o voto.
             if current_voted_candidate_in_epoch == candidate_uri_str:
                 self.logger.info(f"Já votei em {candidate_uri_str} para a época {election_epoch}. Confirmando voto.")
-                return True
+                return True  # Concede o voto (ou confirma o voto anterior).
 
+            # REGRA 3b (Mudança de voto): Se este peer tinha votado em si mesmo, mas o novo candidato tem um URI "menor" (critério de desempate),
+            # o peer muda seu voto para o novo candidato. URIs menores têm preferência em caso de empate na época.
             if current_voted_candidate_in_epoch == str(self.uri) and \
                     candidate_uri_str != str(self.uri) and \
-                    candidate_uri_str < str(self.uri):
+                    candidate_uri_str < str(self.uri):  # Compara lexicograficamente os URIs.
                 self.logger.info(
                     f"Eu votei em mim ({str(self.uri)}) para época {election_epoch}, mas {candidate_uri_str} tem URI menor. Mudando meu voto para {candidate_uri_str}.")
-                self.voted_in_epoch[election_epoch] = candidate_uri_str
+                self.voted_in_epoch[election_epoch] = candidate_uri_str  # Atualiza o voto.
 
+                # Se este peer era um candidato ativo para esta época, ele cancela sua própria candidatura,
+                # pois agora está votando em outro.
                 if self.candidate_for_epoch == 1 and self.candidate_for_epoch_value == election_epoch:
                     self.logger.info(
                         f"Cancelando minha candidatura ativa para época {election_epoch} porque votei em {candidate_uri_str} (URI menor).")
                     if self.election_vote_collection_timer and self.election_vote_collection_timer.is_alive():
-                        self.election_vote_collection_timer.cancel()
-                    self.candidate_for_epoch = 0
-                    self.votes_received_for_epoch.pop(election_epoch, None)
-                self._stop_tracker_timeout_detection()
-                return True
+                        self.election_vote_collection_timer.cancel()  # Para o timer de coleta de votos da sua candidatura.
+                    self.candidate_for_epoch = 0  # Deixa de ser candidato.
+                    self.votes_received_for_epoch.pop(election_epoch, None)  # Remove os votos que recebeu.
+                self._stop_tracker_timeout_detection()  # Para o timer de detecção de falha do tracker, pois uma eleição está em progresso.
+                return True  # Concede o voto ao novo candidato.
             else:
+                # REGRA 3c: Se já votou em outro candidato (que não ele mesmo), ou se votou em si mesmo mas o novo candidato não tem URI menor,
+                # mantém o voto original e nega o voto ao solicitante atual.
                 self.logger.info(
                     f"Voto negado (Regra 3b): já votei em {current_voted_candidate_in_epoch} para a época {election_epoch} e não mudarei (ou meu URI é menor/igual, ou já votei em terceiro).")
-                return False
+                return False  # Nega o voto.
 
-        self.voted_in_epoch[election_epoch] = candidate_uri_str
+        # --- REGRA 4: Primeiro voto para esta época ---
+        # Se nenhuma das condições anteriores foi atendida, significa que este peer ainda não votou
+        # para 'election_epoch'. Portanto, concede o voto ao solicitante.
+        self.voted_in_epoch[election_epoch] = candidate_uri_str  # Registra o voto.
         self.logger.info(
             f"Voto concedido para {candidate_uri_str} para Tracker_Epoca_{election_epoch} (primeiro voto nesta época).")
 
+        # Para o timer de detecção de falha do tracker, pois uma eleição está em progresso e um voto foi dado.
+        # Isso evita que o peer inicie uma nova eleição prematuramente.
         self._stop_tracker_timeout_detection()
 
+        # Se este peer era um candidato para uma época igual ou anterior à 'election_epoch'
+        # e agora está votando em outro candidato (diferente de si mesmo),
+        # ele deve cancelar sua própria candidatura.
         if self.candidate_for_epoch == 1 and \
                 self.candidate_for_epoch_value > 0 and \
                 self.candidate_for_epoch_value <= election_epoch and \
-                str(self.uri) != candidate_uri_str:
+                str(self.uri) != candidate_uri_str:  # Verifica se não está votando em si mesmo.
             self.logger.info(
                 f"Eu era candidato para época {self.candidate_for_epoch_value}, mas votei em {candidate_uri_str} para época {election_epoch}. Cancelando minha candidatura.")
             if self.election_vote_collection_timer and self.election_vote_collection_timer.is_alive():
-                self.election_vote_collection_timer.cancel()
-            self.candidate_for_epoch = 0
+                self.election_vote_collection_timer.cancel()  # Para o timer de coleta de votos.
+            self.candidate_for_epoch = 0  # Deixa de ser candidato.
+            # Remove os votos que possa ter recebido para sua candidatura cancelada.
             self.votes_received_for_epoch.pop(self.candidate_for_epoch_value, None)
 
-        return True
+        return True  # Concede o voto.
 
     def _check_election_results(self):
-        # Checa resultados da eleição e decide se virei tracker
+        # Este método é chamado para verificar o resultado de uma eleição na qual este peer foi um candidato.
+        # Geralmente é acionado após o término do timer de coleta de votos (self.election_vote_collection_timer).
+
+        # Obtém a época da eleição para a qual este peer foi candidato.
+        # self.candidate_for_epoch_value armazena a época se self.candidate_for_epoch for 1.
         election_epoch_being_checked = self.candidate_for_epoch_value
 
+        # Se o peer não é mais um candidato ativo (candidate_for_epoch == 0) ou
+        # se a época da candidatura é inválida (0), não há o que verificar.
         if self.candidate_for_epoch == 0 or election_epoch_being_checked == 0:
             self.logger.debug(
                 f"Verificação de resultados de eleição, mas não sou candidato ativo ou a época da candidatura é 0 (época: {election_epoch_being_checked}).")
-            return
+            return  # Encerra a função.
 
+        # Verifica se há algum registro de votos recebidos para a época da candidatura.
+        # Se não houver entrada no dicionário self.votes_received_for_epoch, significa que nenhum voto foi computado.
         if election_epoch_being_checked not in self.votes_received_for_epoch:
             self.logger.info(f"Nenhum voto registrado para minha candidatura da época {election_epoch_being_checked}.")
-            self.candidate_for_epoch = 0
-            return
+            self.candidate_for_epoch = 0  # Marca que não é mais candidato.
+            return  # Encerra a função.
 
+        # Calcula o número de votos recebidos para a candidatura.
+        # self.votes_received_for_epoch[election_epoch_being_checked] é um set contendo os URIs dos peers que votaram.
+        # O .get() com um set vazio como default é uma segurança, embora a verificação anterior já cubra o caso de não existência da chave.
         num_votes = len(self.votes_received_for_epoch.get(election_epoch_being_checked, set()))
         self.logger.info(
             f"Eleição para época {election_epoch_being_checked}: {num_votes} votos recebidos. Quórum necessário: {QUORUM}.")
 
+        # Compara o número de votos recebidos com o quórum necessário para vencer a eleição.
         if num_votes >= QUORUM:
+            # Se o número de votos é maior ou igual ao quórum, o peer foi eleito.
             self.logger.info(f"Quórum atingido! Eleito como Tracker_Epoca_{election_epoch_being_checked}.")
+            # Chama o método para se tornar o tracker para a época em que foi eleito.
             self._become_tracker(election_epoch_being_checked)
         else:
+            # Se o quórum não foi atingido, a eleição falhou para esta tentativa.
             self.logger.info(
                 f"Quórum não atingido para época {election_epoch_being_checked}. Eleição falhou para esta tentativa.")
+            # Remove o registro de votos para esta época, já que a tentativa falhou.
+            # Isso limpa o estado para futuras eleições ou candidaturas.
             self.votes_received_for_epoch.pop(election_epoch_being_checked, None)
 
+        # Independentemente de ter vencido ou perdido, o peer não é mais considerado um candidato ativo
+        # para esta eleição específica após a verificação dos resultados.
+        # Se ele se tornou tracker, o estado de candidatura é resetado em _become_tracker.
+        # Se perdeu, ele também não é mais candidato para *esta* rodada/época.
         self.candidate_for_epoch = 0
+
 
     def _become_tracker(self, epoch):
         # Assume o papel de tracker e registra no nameserver
